@@ -1,3 +1,11 @@
-fn main() {
-    println!("Hello, world!");
+mod app;
+mod download;
+mod fs_utils;
+mod paths;
+mod settings;
+mod theme;
+mod ui;
+
+fn main() -> eframe::Result<()> {
+    app::run()
 }

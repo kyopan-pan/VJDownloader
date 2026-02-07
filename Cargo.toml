@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dirs = "6.0.0"
+eframe = "0.33.3"
+arboard = "3.6.1"
+url = "2.5.8"
+drag = "2.1.0"
+
+[profile.dev]
+debug-assertions = false
