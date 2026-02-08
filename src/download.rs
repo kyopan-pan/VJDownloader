@@ -317,17 +317,7 @@ pub fn ensure_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf
     }
 
     let url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
-    let status = Command::new("curl")
-        .arg("-L")
-        .arg("-o")
-        .arg(yt_dlp.to_string_lossy().to_string())
-        .arg(url)
-        .status()
-        .map_err(|err| format!("curl起動に失敗しました: {err}"))?;
-
-    if !status.success() {
-        return Err(format!("yt-dlpのダウンロードに失敗しました: {status}"));
-    }
+    curl_download(url, &yt_dlp, "yt-dlp")?;
 
     ensure_executable(&yt_dlp)?;
     if let Some(tx) = tx {
@@ -355,17 +345,7 @@ pub fn ensure_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
 
     let zip_path = bin.join("deno.zip");
     let url = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip";
-    let status = Command::new("curl")
-        .arg("-L")
-        .arg("-o")
-        .arg(zip_path.to_string_lossy().to_string())
-        .arg(url)
-        .status()
-        .map_err(|err| format!("curl起動に失敗しました: {err}"))?;
-
-    if !status.success() {
-        return Err(format!("denoのダウンロードに失敗しました: {status}"));
-    }
+    curl_download(url, &zip_path, "deno")?;
 
     let status = Command::new("unzip")
         .arg("-o")
@@ -417,6 +397,22 @@ fn ensure_executable(path: &Path) -> Result<(), String> {
         fs::set_permissions(path, perms).map_err(|err| err.to_string())?;
     }
     Ok(())
+}
+
+fn curl_download(url: &str, output_path: &Path, label: &str) -> Result<(), String> {
+    let status = Command::new("curl")
+        .arg("-L")
+        .arg("-o")
+        .arg(output_path.to_string_lossy().to_string())
+        .arg(url)
+        .status()
+        .map_err(|err| format!("curl起動に失敗しました: {err}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{label}のダウンロードに失敗しました: {status}"))
+    }
 }
 
 fn base_yt_dlp_args(ffmpeg_path: &str, cookie_args: &[String]) -> Vec<String> {
@@ -508,14 +504,16 @@ fn run_animethemes_pipeline(
                 .arg("-A")
                 .arg(ANIMETHEMES_USER_AGENT)
                 .arg(webm_url);
-            if let Err(err) =
-                run_pipe_to_ffmpeg(cmd, ffmpeg, &output_path, tx, progress, "webm", tracker)
-            {
-                if cancel_flag.load(Ordering::Relaxed) {
-                    return Err(CANCELLED_ERROR.to_string());
-                }
-                return Err(err);
-            }
+            run_pipe_to_ffmpeg_or_cancel(
+                cmd,
+                ffmpeg,
+                &output_path,
+                tx,
+                progress,
+                "webm",
+                tracker,
+                cancel_flag,
+            )?;
         }
         None => {
             let _ = tx.send(DownloadEvent::Log(
@@ -532,14 +530,16 @@ fn run_animethemes_pipeline(
                 .arg("-o")
                 .arg("-")
                 .arg(url);
-            if let Err(err) =
-                run_pipe_to_ffmpeg(cmd, ffmpeg, &output_path, tx, progress, "webm", tracker)
-            {
-                if cancel_flag.load(Ordering::Relaxed) {
-                    return Err(CANCELLED_ERROR.to_string());
-                }
-                return Err(err);
-            }
+            run_pipe_to_ffmpeg_or_cancel(
+                cmd,
+                ffmpeg,
+                &output_path,
+                tx,
+                progress,
+                "webm",
+                tracker,
+                cancel_flag,
+            )?;
         }
     }
 
@@ -709,11 +709,7 @@ fn run_pipe_to_ffmpeg(
         .map_err(|err| format!("パイプライン起動に失敗しました: {err}"))?;
     tracker.register(&producer_child);
 
-    if let Some(stderr) = producer_child.stderr.take() {
-        let tx_stderr = tx.clone();
-        let progress_ctx = progress.clone();
-        thread::spawn(move || stream_lines(stderr, tx_stderr, progress_ctx));
-    }
+    spawn_stream_thread(producer_child.stderr.take(), tx, progress);
 
     let mut ffmpeg_cmd = Command::new(ffmpeg);
     ffmpeg_cmd
@@ -758,17 +754,8 @@ fn run_pipe_to_ffmpeg(
         .map_err(|err| format!("ffmpeg起動に失敗しました: {err}"))?;
     tracker.register(&ffmpeg_child);
 
-    if let Some(stdout) = ffmpeg_child.stdout.take() {
-        let tx_stdout = tx.clone();
-        let progress_ctx = progress.clone();
-        thread::spawn(move || stream_lines(stdout, tx_stdout, progress_ctx));
-    }
-
-    if let Some(stderr) = ffmpeg_child.stderr.take() {
-        let tx_stderr = tx.clone();
-        let progress_ctx = progress.clone();
-        thread::spawn(move || stream_lines(stderr, tx_stderr, progress_ctx));
-    }
+    spawn_stream_thread(ffmpeg_child.stdout.take(), tx, progress);
+    spawn_stream_thread(ffmpeg_child.stderr.take(), tx, progress);
 
     let ffmpeg_status = ffmpeg_child
         .wait()
@@ -785,6 +772,36 @@ fn run_pipe_to_ffmpeg(
     }
 
     Ok(())
+}
+
+fn run_pipe_to_ffmpeg_or_cancel(
+    producer: Command,
+    ffmpeg: &Path,
+    output_path: &Path,
+    tx: &mpsc::Sender<DownloadEvent>,
+    progress: &Arc<ProgressContext>,
+    input_format: &str,
+    tracker: &ProcessTracker,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    match run_pipe_to_ffmpeg(
+        producer,
+        ffmpeg,
+        output_path,
+        tx,
+        progress,
+        input_format,
+        tracker,
+    ) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if cancel_flag.load(Ordering::Relaxed) {
+                Err(CANCELLED_ERROR.to_string())
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 fn run_yt_dlp(
@@ -817,17 +834,8 @@ fn run_yt_dlp(
         .map_err(|err| format!("yt-dlpの起動に失敗しました: {err}"))?;
     tracker.register(&child);
 
-    if let Some(stdout) = child.stdout.take() {
-        let tx_stdout = tx.clone();
-        let progress_ctx = progress.clone();
-        thread::spawn(move || stream_lines(stdout, tx_stdout, progress_ctx));
-    }
-
-    if let Some(stderr) = child.stderr.take() {
-        let tx_stderr = tx.clone();
-        let progress_ctx = progress.clone();
-        thread::spawn(move || stream_lines(stderr, tx_stderr, progress_ctx));
-    }
+    spawn_stream_thread(child.stdout.take(), tx, &progress);
+    spawn_stream_thread(child.stderr.take(), tx, &progress);
 
     child.wait().map_err(|err| err.to_string())
 }
@@ -865,6 +873,18 @@ fn stream_lines<R: Read + Send + 'static>(
     if !line.is_empty() {
         let text = String::from_utf8_lossy(&line).to_string();
         handle_stream_line(text, &tx, &progress);
+    }
+}
+
+fn spawn_stream_thread<R: Read + Send + 'static>(
+    reader: Option<R>,
+    tx: &mpsc::Sender<DownloadEvent>,
+    progress: &Arc<ProgressContext>,
+) {
+    if let Some(reader) = reader {
+        let tx_clone = tx.clone();
+        let progress_clone = progress.clone();
+        thread::spawn(move || stream_lines(reader, tx_clone, progress_clone));
     }
 }
 
