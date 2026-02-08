@@ -11,7 +11,7 @@
 
 ## 保存先と設定
 - 既定の保存先は`~/Movies/YtDlpDownloads`。
-- 設定ファイルは`~/.ytdownloader/settings.properties`。
+- 設定ファイルは`~/.vjdownloader/settings.properties`。
 - 設定キー`download.dir`が存在し空でない場合、その値を保存先として使用する。
 - 設定ファイルは`#`または`!`で始まる行をコメントとして無視する。
 - 設定ファイルは`key=value`または`key:value`形式の行のみを読む。
@@ -23,53 +23,59 @@
 - クッキー取得はyt-dlpの`--cookies-from-browser`オプションとして渡す。
 
 ## 内部パス
-- アプリ用データは`~/.ytdownloader`配下を使用する。
-- `~/.ytdownloader/bin`にツール用のバイナリを配置する。
-- yt-dlpは`~/.ytdownloader/bin/yt-dlp`に保存する。
-- ffmpegは`~/.ytdownloader/bin/ffmpeg`を参照する。
-- denoは`~/.ytdownloader/bin/deno`を参照する。
+- アプリ用データは`~/.vjdownloader`配下を使用する。
+- `~/.vjdownloader/bin`にツール用のバイナリを配置する。
+- yt-dlpは`~/.vjdownloader/bin/yt-dlp`に保存する。
+- ffmpegは`~/.vjdownloader/bin/ffmpeg`を参照する。
+- ffprobeは`~/.vjdownloader/bin/ffprobe`を参照する。
+- denoは`~/.vjdownloader/bin/deno`を参照する。
 
 ## ダウンロード開始
-- ダウンロード開始はクリップボードURLを利用する。
-- クリップボードにURLがない場合はステータスにエラーを表示して終了する。
-- クリップボード内に`URL=`で始まる行がある場合、そのURLを優先的に抽出する。
-- クリップボード内にwebloc形式(XML)がある場合、そのURLを抽出する。
-- 文字列中の`http://`または`https://`で始まるトークンをURLとして検出する。
-- URLは`http`または`https`のみ有効とする。
+- ダウンロード開始はクリップボードの文字列をそのままURLとして利用する。
+- クリップボードに文字列がない、または空の場合は何もしない。
 
 ## ダウンロード処理
 - ダウンロードは別スレッドで実行する。
-- yt-dlpが存在しない場合はGitHubの最新リリースから`yt-dlp_macos`をダウンロードする。
+- 起動時にバックグラウンドでyt-dlp/denoの有無を確認し、未導入ならGitHubの最新リリースから取得する。
 - yt-dlpをダウンロードした後、実行権限を付与する。
+- ffmpeg/ffprobeは同梱バイナリから`~/.vjdownloader/bin`へコピーし、実行権限を付与する。
+- denoが存在しない場合はGitHubの最新リリースから`deno-aarch64-apple-darwin.zip`をダウンロードし展開する。
+- yt-dlpが実行可能でない場合はダウンロードを開始しない。
 - 保存先フォルダが存在しない場合は作成する。
 - 出力テンプレートは`%(title)s.%(ext)s`を使用する。
-- yt-dlp実行時に`~/.ytdownloader/bin`をPATH先頭に追加する。
+- yt-dlp実行時に`~/.vjdownloader/bin`をPATH先頭に追加する。
 - yt-dlpのstdout/stderrは行単位で読み取り、ログと進捗に反映する。
-- yt-dlpの出力から保存パスを検出した場合、ファイル一覧を更新し`Saved: <filename>`をログに追加する。
+- ダウンロード中にStopを押した場合は実行中のプロセスを終了してキャンセルする。
 
 ## ダウンロードオプション（優先モード）
-- `--print after_move:filepath`で保存パスを取得する。
 - `--no-playlist`を指定する。
 - `--extractor-args youtube:player_client=web`を指定する。
 - `--extractor-args youtube:skip=translated_subs`を指定する。
 - `--concurrent-fragments 4`を指定する。
 - `-S vcodec:h264,res,acodec:m4a`を指定する。
 - `--match-filter vcodec~='(?i)^(avc|h264)'`を指定する。
-- ffmpegが存在する場合は`--merge-output-format mp4`と`--ffmpeg-location`を指定する。
-- denoが存在する場合は`--js-runtimes deno`を指定する。
+- `--merge-output-format mp4`と`--ffmpeg-location`を指定する。
+- `--js-runtimes deno`を指定する。
 - 優先モードが失敗した場合は互換モードで再試行する。
 
 ## ダウンロードオプション（互換モード）
-- `--print after_move:filepath`で保存パスを取得する。
 - `--no-playlist`を指定する。
 - `--extractor-args youtube:player_client=web`を指定する。
 - `--extractor-args youtube:skip=translated_subs`を指定する。
 - `--concurrent-fragments 4`を指定する。
-- ffmpegが存在する場合は`-f bv*[height<=720]+ba/b[height<=720]`を指定する。
-- ffmpegが存在する場合は`--recode-video mp4`を指定する。
-- ffmpegが存在する場合は`--postprocessor-args VideoConvertor:-c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p`を指定する。
-- ffmpegが存在しない場合は`-f b[height<=720]`を指定する。
-- denoが存在する場合は`--js-runtimes deno`を指定する。
+- `-f bv*[height<=720]+ba/b[height<=720]`を指定する。
+- `--recode-video mp4`を指定する。
+- `--postprocessor-args VideoConvertor:-c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p`を指定する。
+- `--ffmpeg-location`を指定する。
+- `--js-runtimes deno`を指定する。
+
+## AnimeThemes専用パイプライン
+- URLに`animethemes.moe`を含む場合に専用パイプラインへ分岐する。
+- ファイル名はURLパスを基にした`.mp4`（タイムスタンプ付き）を使用する。
+- 直リンク取得（優先）: ページHTMLを`curl -sL -m 8 -A <UA>`で取得し`og:video`または`video src`から`https://.../*.webm`を抽出する（先頭約30KBで打ち切る）。
+- 直リンクを取得できた場合は`curl -L -m 120 --fail -o - -A <UA> <直リンク>`の出力をffmpegへパイプする。
+- 直リンク取得に失敗した場合は`yt-dlp --no-playlist --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`の出力をffmpegへパイプする。
+- ffmpegは`-loglevel error -analyzeduration 100M -probesize 100M -f webm -i pipe:0 -c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`で実行する。
 
 ## 進捗表示
 - 進捗パネルは常に表示され、待機中は半透明表示となる。
@@ -83,7 +89,7 @@
 
 ## 進捗の判定
 - yt-dlp出力に`[merger]`や`[ffmpeg]`などの語が出現した場合は変換フェーズと判定する。
-- yt-dlp出力中の`%`表記から進捗率を抽出する。
+- yt-dlp出力中の`%`表記から進捗率を抽出する。進捗率が100%でも変換中には切り替えない。
 
 ## ファイル一覧
 - 保存先フォルダ内の`.mp4`のみを表示する。
@@ -112,9 +118,9 @@
 - `ログをクリア`ボタンでログを削除し、`ログをクリアしました。`を追加する。
 
 ## UIテキスト
-- メインボタンの表示は`Download`。
+- メインボタンの表示は待機時`Download`、ダウンロード中は`Stop`。
 - サブタイトルに`リストをドラッグしてVDMXへドロップ`を表示する。
-- ダウンロード中はメインボタンが無効化され、ホバー時に`ダウンロード中です`を表示する。
+- ダウンロード中もメインボタンは有効で、クリックするとキャンセルする。
 
 ## テーマとフォント
 - ダークテーマを適用する。
@@ -125,7 +131,6 @@
 - 日本語フォントはHiragino Sans等のシステムフォントから順に使用する。
 
 ## エラーハンドリング
-- クリップボードアクセス失敗時はステータスにエラーを表示する。
 - 保存先作成失敗時はダウンロードを中断し、エラーを表示する。
 - yt-dlp起動失敗時はダウンロード失敗として扱う。
 - ファイル削除失敗時はステータスに`削除に失敗しました: <error>`を表示する。

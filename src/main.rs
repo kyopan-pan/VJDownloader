@@ -1,4 +1,5 @@
 mod app;
+mod bundled;
 mod download;
 mod fs_utils;
 mod paths;

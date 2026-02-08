@@ -17,23 +17,29 @@ pub fn render(app: &mut DownloaderApp, ctx: &egui::Context, frame: &eframe::Fram
             .corner_radius(egui::CornerRadius::same(24))
             .inner_margin(egui::Margin::symmetric(content_margin, content_margin))
             .show(ui, |ui| {
+                let (label, fill) = if app.download_in_progress {
+                    ("Stop", egui::Color32::from_rgb(248, 113, 113))
+                } else {
+                    ("Download", egui::Color32::from_rgb(16, 190, 255))
+                };
                 let button = egui::Button::new(
-                    egui::RichText::new("Download")
+                    egui::RichText::new(label)
                         .size(20.0)
                         .color(egui::Color32::from_rgb(8, 14, 24)),
                 )
-                .fill(egui::Color32::from_rgb(16, 190, 255))
+                .fill(fill)
                 .corner_radius(egui::CornerRadius::same(22));
 
-                ui.add_enabled_ui(!app.download_in_progress, |ui| {
-                    if ui
-                        .add_sized([ui.available_width(), 64.0], button)
-                        .on_disabled_hover_text("ダウンロード中です")
-                        .clicked()
-                    {
+                if ui
+                    .add_sized([ui.available_width(), 64.0], button)
+                    .clicked()
+                {
+                    if app.download_in_progress {
+                        app.request_cancel_download();
+                    } else {
                         app.start_download_from_clipboard();
                     }
-                });
+                }
             });
 
         ui.add_space(8.0);

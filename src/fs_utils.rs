@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub fn ensure_dir(path: &Path) -> Result<(), String> {
@@ -43,4 +44,10 @@ pub fn delete_download_file(path: &Path) -> Result<(), String> {
         return Err("ファイルが見つかりません。".to_string());
     }
     fs::remove_file(path).map_err(|err| err.to_string())
+}
+
+pub fn is_executable(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }

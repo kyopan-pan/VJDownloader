@@ -7,7 +7,7 @@ pub fn default_download_dir() -> PathBuf {
 
 pub fn app_data_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".ytdownloader")
+    home.join(".vjdownloader")
 }
 
 pub fn settings_file_path() -> PathBuf {
@@ -24,6 +24,10 @@ pub fn yt_dlp_path() -> PathBuf {
 
 pub fn ffmpeg_path() -> PathBuf {
     bin_dir().join("ffmpeg")
+}
+
+pub fn ffprobe_path() -> PathBuf {
+    bin_dir().join("ffprobe")
 }
 
 pub fn deno_path() -> PathBuf {
