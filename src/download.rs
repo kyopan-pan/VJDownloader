@@ -392,6 +392,22 @@ pub fn ensure_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
     Ok(deno)
 }
 
+pub fn update_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
+    let yt_dlp = yt_dlp_path();
+    if yt_dlp.exists() {
+        let _ = fs::remove_file(&yt_dlp);
+    }
+    ensure_yt_dlp(tx)
+}
+
+pub fn update_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
+    let deno = deno_path();
+    if deno.exists() {
+        let _ = fs::remove_file(&deno);
+    }
+    ensure_deno(tx)
+}
+
 fn ensure_executable(path: &Path) -> Result<(), String> {
     let metadata = fs::metadata(path).map_err(|err| err.to_string())?;
     let mut perms = metadata.permissions();

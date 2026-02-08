@@ -5,28 +5,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
-
 use crate::bundled::ensure_bundled_tools;
 use crate::download::{
     ensure_deno, ensure_yt_dlp, read_clipboard_text, run_download, DownloadEvent, ProcessTracker,
     ProgressUpdate, CANCELLED_ERROR,
 };
 use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
-use crate::paths::{default_download_dir, yt_dlp_path};
-use crate::settings::{load_cookie_args, load_download_dir_from_settings};
+use crate::mac_menu;
+use crate::paths::yt_dlp_path;
+use crate::settings::{load_cookie_args, save_settings, SettingsData};
+use crate::settings_ui;
 use crate::theme::apply_theme;
 use crate::ui;
 
 pub fn run() -> eframe::Result<()> {
+    let settings = SettingsData::load();
+    let window_width = settings.window_width.parse::<f32>().unwrap_or(300.0);
+    let window_height = settings.window_height.parse::<f32>().unwrap_or(1000.0);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([420.0, 720.0])
-            .with_min_inner_size([360.0, 640.0]),
+            .with_inner_size([window_width, window_height])
+            .with_min_inner_size([260.0, 320.0])
+            .with_always_on_top(),
         ..Default::default()
     };
 
     eframe::run_native(
-        "VJ Downloader (Rust)",
+        "YT Downloader",
         options,
         Box::new(|cc| Ok(Box::new(DownloaderApp::new(cc)))),
     )
@@ -35,7 +40,6 @@ pub fn run() -> eframe::Result<()> {
 pub struct DownloaderApp {
     pub(crate) download_dir: PathBuf,
     pub(crate) downloaded_files: Vec<PathBuf>,
-    pub(crate) status: Vec<String>,
     pub(crate) download_in_progress: bool,
     pub(crate) progress_message: String,
     pub(crate) progress_value: f32,
@@ -46,17 +50,21 @@ pub struct DownloaderApp {
     pub(crate) rx: Option<mpsc::Receiver<DownloadEvent>>,
     pub(crate) last_scan: Instant,
     pub(crate) refresh_needed: bool,
+    pub(crate) settings_ui: settings_ui::SettingsUiState,
+    pub(crate) pending_window_resize: Option<egui::Vec2>,
+    pub(crate) did_snap: bool,
+    pub(crate) current_window_size: Option<egui::Vec2>,
 }
 
 impl DownloaderApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
-        let download_dir = load_download_dir_from_settings().unwrap_or_else(default_download_dir);
+        let settings = SettingsData::load();
+        let download_dir = PathBuf::from(settings.download_dir.trim());
 
         let mut app = Self {
             download_dir,
             downloaded_files: Vec::new(),
-            status: vec!["Ready.".to_string()],
             download_in_progress: false,
             progress_message: "待機中...".to_string(),
             progress_value: 0.0,
@@ -67,7 +75,13 @@ impl DownloaderApp {
             rx: None,
             last_scan: Instant::now() - Duration::from_secs(5),
             refresh_needed: true,
+            settings_ui: settings_ui::SettingsUiState::new(),
+            pending_window_resize: None,
+            did_snap: false,
+            current_window_size: None,
         };
+
+        mac_menu::install_settings_menu();
 
         if let Err(err) = ensure_bundled_tools() {
             app.push_status(format!("同梱ツールの配置に失敗しました: {err}"));
@@ -82,13 +96,8 @@ impl DownloaderApp {
     }
 
     pub(crate) fn push_status(&mut self, message: impl Into<String>) {
-        const MAX_LINES: usize = 200;
         let message = message.into();
         println!("{message}");
-        self.status.push(message);
-        if self.status.len() > MAX_LINES {
-            self.status.drain(0..self.status.len().saturating_sub(MAX_LINES));
-        }
     }
 
     pub(crate) fn start_download_from_clipboard(&mut self) {
@@ -96,10 +105,11 @@ impl DownloaderApp {
             return;
         };
 
-        if !self.is_yt_dlp_ready() {
+        if !self.is_tools_ready() {
             self.push_status(
-                "yt-dlpがまだ準備できていません。しばらく待ってから再試行してください。".to_string(),
+                "初回セットアップが必要です。設定から自動セットアップを行ってください。".to_string(),
             );
+            self.settings_ui.open_initial_setup();
             return;
         }
 
@@ -232,13 +242,53 @@ impl DownloaderApp {
         let path = yt_dlp_path();
         path.exists() && is_executable(&path)
     }
+
+    fn is_tools_ready(&self) -> bool {
+        self.is_yt_dlp_ready()
+    }
 }
 
 impl eframe::App for DownloaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if mac_menu::take_open_settings_request() {
+            self.settings_ui.open_settings();
+        }
+        self.current_window_size = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.size()));
+        if let Some(size) = self.pending_window_resize.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+        if !self.did_snap {
+            let (monitor_size, inner_rect) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().inner_rect));
+            if let (Some(monitor_size), Some(inner_rect)) = (monitor_size, inner_rect) {
+                let margin = 12.0;
+                let x = (monitor_size.x - inner_rect.width() - margin).max(0.0);
+                let y = margin.max(0.0);
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+                self.did_snap = true;
+            }
+        }
+        self.settings_ui.poll_tool_updates();
+        self.settings_ui.auto_refresh_if_needed();
         self.poll_download_events();
         self.refresh_downloads_if_needed();
         ui::render(self, ctx, _frame);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(size) = self.current_window_size {
+            let mut data = SettingsData::load();
+            data.window_width = format_dimension(size.x.max(260.0));
+            data.window_height = format_dimension(size.y.max(320.0));
+            let _ = save_settings(&data);
+        }
+    }
+}
+
+fn format_dimension(value: f32) -> String {
+    if value.fract() == 0.0 {
+        format!("{:.0}", value)
+    } else {
+        format!("{value}")
     }
 }
 

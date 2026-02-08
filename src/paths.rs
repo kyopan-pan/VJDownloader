@@ -7,11 +7,21 @@ pub fn default_download_dir() -> PathBuf {
 
 pub fn app_data_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".vjdownloader")
+    home.join(".ytdownloader")
 }
 
 pub fn settings_file_path() -> PathBuf {
     app_data_dir().join("settings.properties")
+}
+
+pub fn make_absolute_path(raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return path;
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(path)
 }
 
 pub fn bin_dir() -> PathBuf {

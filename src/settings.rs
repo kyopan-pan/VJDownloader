@@ -2,21 +2,91 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::paths::settings_file_path;
+use crate::paths::{default_download_dir, make_absolute_path, settings_file_path};
 
-pub fn load_download_dir_from_settings() -> Option<PathBuf> {
-    let props = load_settings_properties();
-    props
-        .get("download.dir")
-        .and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(trimmed))
-            }
-        })
-        .map(|path| path)
+#[derive(Clone, Debug)]
+pub struct SettingsData {
+    pub window_width: String,
+    pub window_height: String,
+    pub download_dir: String,
+    pub cookies_enabled: bool,
+    pub cookies_browser: String,
+    pub cookies_profile: String,
+}
+
+impl SettingsData {
+    pub fn load() -> Self {
+        let props = load_settings_properties();
+        let window_width = parse_dimension(
+            props.get("window.width"),
+            DEFAULT_WINDOW_WIDTH,
+            MIN_WINDOW_WIDTH,
+        );
+        let window_height = parse_dimension(
+            props.get("window.height"),
+            DEFAULT_WINDOW_HEIGHT,
+            MIN_WINDOW_HEIGHT,
+        );
+        let download_dir = props
+            .get("download.dir")
+            .map(|value| normalize_dir(value))
+            .unwrap_or_else(default_download_dir)
+            .to_string_lossy()
+            .to_string();
+        let cookies_enabled = props
+            .get("cookies.from_browser.enabled")
+            .map(|v| parse_bool(v, false))
+            .unwrap_or(false);
+        let cookies_browser = props
+            .get("cookies.from_browser.browser")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let cookies_profile = props
+            .get("cookies.from_browser.profile")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        Self {
+            window_width: format_dimension(window_width),
+            window_height: format_dimension(window_height),
+            download_dir,
+            cookies_enabled,
+            cookies_browser,
+            cookies_profile,
+        }
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        let path = settings_file_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        fs::write(path, self.to_properties_string()).map_err(|err| err.to_string())
+    }
+
+    fn to_properties_string(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("window.width={}", self.window_width.trim()));
+        lines.push(format!("window.height={}", self.window_height.trim()));
+        let download_dir = self.download_dir.trim();
+        lines.push(format!("download.dir={download_dir}"));
+        lines.push(format!(
+            "cookies.from_browser.enabled={}",
+            if self.cookies_enabled { "true" } else { "false" }
+        ));
+        lines.push(format!(
+            "cookies.from_browser.browser={}",
+            self.cookies_browser.trim()
+        ));
+        lines.push(format!(
+            "cookies.from_browser.profile={}",
+            self.cookies_profile.trim()
+        ));
+        lines.join("\n")
+    }
+}
+
+pub fn save_settings(data: &SettingsData) -> Result<(), String> {
+    data.save()
 }
 
 pub fn load_cookie_args() -> Vec<String> {
@@ -76,4 +146,37 @@ fn parse_bool(raw: &str, fallback: bool) -> bool {
         return fallback;
     }
     trimmed.eq_ignore_ascii_case("true")
+}
+
+const DEFAULT_WINDOW_WIDTH: f32 = 300.0;
+const DEFAULT_WINDOW_HEIGHT: f32 = 1000.0;
+const MIN_WINDOW_WIDTH: f32 = 260.0;
+const MIN_WINDOW_HEIGHT: f32 = 320.0;
+
+fn parse_dimension(raw: Option<&String>, fallback: f32, min: f32) -> f32 {
+    let Some(raw) = raw else {
+        return fallback.max(min);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return fallback.max(min);
+    }
+    let parsed = trimmed.parse::<f32>().unwrap_or(fallback);
+    parsed.max(min)
+}
+
+fn format_dimension(value: f32) -> String {
+    if value.fract() == 0.0 {
+        format!("{:.0}", value)
+    } else {
+        format!("{value}")
+    }
+}
+
+fn normalize_dir(value: &str) -> PathBuf {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return default_download_dir();
+    }
+    make_absolute_path(trimmed)
 }

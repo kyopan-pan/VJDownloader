@@ -1,6 +1,9 @@
 use eframe::egui;
 
-pub fn apply_theme(ctx: &egui::Context) {
+pub fn apply_theme(
+    // テーマ適用先のeguiコンテキスト
+    ctx: &egui::Context,
+) {
     let mut style = (*ctx.style()).clone();
     style.visuals = egui::Visuals::dark();
     style.visuals.window_fill = egui::Color32::from_rgb(12, 18, 32);
@@ -25,7 +28,10 @@ pub fn apply_theme(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-fn install_fonts(fonts: &mut egui::FontDefinitions) {
+fn install_fonts(
+    // 登録済みフォント定義への追加先
+    fonts: &mut egui::FontDefinitions,
+) {
     let brand_candidates = [
         "/System/Library/Fonts/SFNS.ttf",
         "/System/Library/Fonts/SFNSDisplay.ttf",
@@ -64,7 +70,10 @@ fn install_fonts(fonts: &mut egui::FontDefinitions) {
     }
 }
 
-fn load_first_font(paths: &[&str]) -> Option<egui::FontData> {
+fn load_first_font(
+    // 探索するフォントファイル候補一覧
+    paths: &[&str],
+) -> Option<egui::FontData> {
     for path in paths {
         if let Ok(bytes) = std::fs::read(path) {
             return Some(egui::FontData::from_owned(bytes));
