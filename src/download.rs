@@ -374,18 +374,71 @@ pub fn ensure_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
 
 pub fn update_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
     let yt_dlp = yt_dlp_path();
-    if yt_dlp.exists() {
-        let _ = fs::remove_file(&yt_dlp);
-    }
-    ensure_yt_dlp(tx)
+    update_tool_with_rollback(&yt_dlp, "yt-dlp", tx, ensure_yt_dlp)
 }
 
 pub fn update_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
     let deno = deno_path();
-    if deno.exists() {
-        let _ = fs::remove_file(&deno);
+    update_tool_with_rollback(&deno, "deno", tx, ensure_deno)
+}
+
+fn update_tool_with_rollback<F>(
+    path: &Path,
+    label: &str,
+    tx: Option<&mpsc::Sender<DownloadEvent>>,
+    installer: F,
+) -> Result<PathBuf, String>
+where
+    F: FnOnce(Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String>,
+{
+    if !path.exists() {
+        return installer(tx);
     }
-    ensure_deno(tx)
+
+    let backup_path = next_backup_path(path);
+    fs::rename(path, &backup_path)
+        .map_err(|err| format!("{label}の更新準備に失敗しました: {err}"))?;
+
+    match installer(tx) {
+        Ok(updated_path) => {
+            let _ = fs::remove_file(&backup_path);
+            Ok(updated_path)
+        }
+        Err(err) => {
+            if path.exists() {
+                let _ = fs::remove_file(path);
+            }
+            match fs::rename(&backup_path, path) {
+                Ok(()) => Err(err),
+                Err(restore_err) => Err(format!(
+                    "{label}の更新に失敗し、旧バージョンの復元にも失敗しました: {restore_err} (更新エラー: {err})"
+                )),
+            }
+        }
+    }
+}
+
+fn next_backup_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tool");
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let pid = std::process::id();
+
+    for idx in 0..1000 {
+        let suffix = if idx == 0 {
+            format!("{pid}")
+        } else {
+            format!("{pid}.{idx}")
+        };
+        let candidate = parent.join(format!("{file_name}.update-backup.{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    parent.join(format!("{file_name}.update-backup.fallback"))
 }
 
 fn ensure_executable(path: &Path) -> Result<(), String> {
