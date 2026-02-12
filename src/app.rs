@@ -7,6 +7,7 @@ use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
 use crate::log_ui;
 use crate::mac_input_source::{InputMode, current_mode};
 use crate::mac_menu;
+use crate::mac_window;
 use crate::paths::{search_index_db_path, yt_dlp_path};
 use crate::search_index::{SearchEngine, SearchHit, SearchRequest, SearchSort};
 use crate::settings::{SettingsData, load_cookie_args, save_settings};
@@ -456,6 +457,7 @@ impl DownloaderApp {
 
 impl eframe::App for DownloaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        mac_window::enable_mouse_move_events_for_all_windows();
         if mac_menu::take_open_settings_request() {
             self.settings_ui.open_settings();
         }

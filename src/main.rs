@@ -7,6 +7,7 @@ mod log_ui;
 mod mac_file_dialog;
 mod mac_input_source;
 mod mac_menu;
+mod mac_window;
 mod paths;
 mod search_index;
 mod settings;

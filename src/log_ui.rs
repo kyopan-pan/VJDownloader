@@ -40,7 +40,8 @@ pub fn render_log_viewport(
     let builder = egui::ViewportBuilder::default()
         .with_title("ログ")
         .with_inner_size(egui::vec2(760.0, 460.0))
-        .with_min_inner_size(egui::vec2(520.0, 280.0));
+        .with_min_inner_size(egui::vec2(520.0, 280.0))
+        .with_always_on_top();
 
     ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
         if ctx.input(|i| i.viewport().close_requested()) {

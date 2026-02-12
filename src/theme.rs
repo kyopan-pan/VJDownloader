@@ -21,8 +21,11 @@ pub fn apply_theme(
     style.visuals.selection.bg_fill = egui::Color32::from_rgb(52, 62, 84);
     style.visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
     style.visuals.hyperlink_color = egui::Color32::from_rgb(16, 190, 255);
+    style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     style.spacing.item_spacing = egui::vec2(12.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 10.0);
+    style.spacing.scroll = egui::style::ScrollStyle::floating();
+    style.spacing.scroll.bar_outer_margin = 0.0;
     ctx.set_style(style);
 
     let mut fonts = egui::FontDefinitions::default();

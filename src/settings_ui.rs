@@ -269,7 +269,8 @@ fn render_initial_setup_viewport(
     let builder = egui::ViewportBuilder::default()
         .with_title("初回セットアップ")
         .with_inner_size(egui::vec2(560.0, 520.0))
-        .with_resizable(false);
+        .with_resizable(false)
+        .with_always_on_top();
 
     ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -319,7 +320,8 @@ fn render_settings_viewport(
     let builder = egui::ViewportBuilder::default()
         .with_title("設定")
         .with_inner_size(egui::vec2(640.0, 640.0))
-        .with_resizable(false);
+        .with_resizable(false)
+        .with_always_on_top();
 
     ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -430,6 +432,12 @@ fn render_settings_contents(
             bottom: 18,
         })
         .show(ui, |ui| {
+            let mut style = ui.style().as_ref().clone();
+            style.spacing.scroll = egui::style::ScrollStyle::thin();
+            style.spacing.scroll.bar_outer_margin = 0.0;
+            style.spacing.scroll.floating_allocated_width = style.spacing.scroll.bar_width;
+            ui.set_style(style);
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
