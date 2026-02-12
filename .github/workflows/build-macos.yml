@@ -107,6 +107,13 @@ jobs:
           </plist>
           PLIST
 
+      # 公証なし運用でも「壊れている」判定を避けるため ad-hoc 署名を付与
+      - name: Ad-hoc sign .app (Gatekeeper対策)
+        run: |
+          xattr -cr "dist/VJDownloader.app"
+          codesign --force --deep --sign - "dist/VJDownloader.app"
+          codesign --verify --deep --strict --verbose=2 "dist/VJDownloader.app"
+
       # Applications へドラッグする想定の DMG を作成
       - name: Create DMG artifact (DMG作成)
         run: |
