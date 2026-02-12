@@ -370,14 +370,20 @@ fn render_download_list(
                     ),
                     egui::vec2(remove_width, remove_height),
                 );
+                let remove_hovered = ctx.input(|i| {
+                    i.pointer
+                        .latest_pos()
+                        .is_some_and(|pos| remove_rect.contains(pos))
+                });
+                let remove_color = if remove_hovered {
+                    egui::Color32::from_rgb(252, 165, 165)
+                } else {
+                    egui::Color32::from_rgb(200, 210, 230)
+                };
                 let remove_button = ui.put(
                     remove_rect,
-                    egui::Button::new(
-                        egui::RichText::new("✕")
-                            .size(15.0)
-                            .color(egui::Color32::from_rgb(200, 210, 230)),
-                    )
-                    .frame(false),
+                    egui::Button::new(egui::RichText::new("✕").size(15.0).color(remove_color))
+                        .frame(false),
                 );
                 if remove_button.clicked() {
                     remove_paths.push(path.clone());
@@ -464,8 +470,7 @@ fn render_progress_panel(
                 egui::Color32::from_rgba_unmultiplied(255, 255, 255, 31),
                 opacity,
             );
-            let bar_left = apply_opacity(egui::Color32::from_rgb(56, 189, 248), opacity);
-            let bar_right = apply_opacity(egui::Color32::from_rgb(14, 165, 233), opacity);
+            let bar_fill = apply_opacity(egui::Color32::from_rgb(56, 189, 248), opacity);
             let rounding = egui::CornerRadius::same(8);
 
             ui.painter().rect_filled(rect, rounding, track_color);
@@ -487,7 +492,7 @@ fn render_progress_panel(
                             egui::pos2(seg_min, rect.top()),
                             egui::pos2(seg_max, rect.bottom()),
                         );
-                        paint_bar_segment(ui.painter(), seg_rect, rounding, bar_left, bar_right);
+                        ui.painter().rect_filled(seg_rect, rounding, bar_fill);
                     }
                     ctx.request_repaint();
                 } else {
@@ -498,49 +503,11 @@ fn render_progress_panel(
                             rect.min,
                             egui::pos2(rect.left() + fill_width, rect.bottom()),
                         );
-                        paint_bar_segment(ui.painter(), fill_rect, rounding, bar_left, bar_right);
+                        ui.painter().rect_filled(fill_rect, rounding, bar_fill);
                     }
                 }
             }
         });
-}
-
-fn paint_bar_segment(
-    // 実描画を行うペインタ
-    painter: &egui::Painter,
-    // 描画するバー領域
-    rect: egui::Rect,
-    // 角丸の半径設定
-    rounding: egui::CornerRadius,
-    // 左側グラデーション色
-    left: egui::Color32,
-    // 右側グラデーション色
-    right: egui::Color32,
-) {
-    if rect.width() <= 2.0 {
-        painter.rect_filled(rect, rounding, left);
-        return;
-    }
-
-    let mid_x = rect.center().x;
-    let left_rect = egui::Rect::from_min_max(rect.min, egui::pos2(mid_x, rect.bottom()));
-    let right_rect = egui::Rect::from_min_max(egui::pos2(mid_x, rect.top()), rect.max);
-
-    let left_rounding = egui::CornerRadius {
-        nw: rounding.nw,
-        sw: rounding.sw,
-        ne: 0,
-        se: 0,
-    };
-    let right_rounding = egui::CornerRadius {
-        nw: 0,
-        sw: 0,
-        ne: rounding.ne,
-        se: rounding.se,
-    };
-
-    painter.rect_filled(left_rect, left_rounding, left);
-    painter.rect_filled(right_rect, right_rounding, right);
 }
 
 fn apply_opacity(

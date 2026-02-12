@@ -362,7 +362,9 @@ impl DownloaderApp {
         match mode {
             InputMode::Japanese => self.push_status("日本語になりました".to_string()),
             InputMode::English => self.push_status("英字になりました".to_string()),
-            InputMode::Other(name) => self.push_status(format!("入力ソースが変更されました: {name}")),
+            InputMode::Other(name) => {
+                self.push_status(format!("入力ソースが変更されました: {name}"))
+            }
         }
     }
 

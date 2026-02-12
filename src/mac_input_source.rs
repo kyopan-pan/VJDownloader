@@ -15,7 +15,10 @@ mod imp {
     #[link(name = "Carbon", kind = "framework")]
     unsafe extern "C" {
         fn TISCopyCurrentKeyboardInputSource() -> *const c_void;
-        fn TISGetInputSourceProperty(input_source: *const c_void, key: *const c_void) -> *const c_void;
+        fn TISGetInputSourceProperty(
+            input_source: *const c_void,
+            key: *const c_void,
+        ) -> *const c_void;
 
         static kTISPropertyInputSourceID: *const c_void;
         static kTISPropertyLocalizedName: *const c_void;
@@ -47,18 +50,12 @@ mod imp {
         }
 
         let input_source_id = unsafe {
-            cf_string_to_rust(TISGetInputSourceProperty(
-                source,
-                kTISPropertyInputSourceID,
-            ))
+            cf_string_to_rust(TISGetInputSourceProperty(source, kTISPropertyInputSourceID))
         }
         .unwrap_or_default();
 
         let localized_name = unsafe {
-            cf_string_to_rust(TISGetInputSourceProperty(
-                source,
-                kTISPropertyLocalizedName,
-            ))
+            cf_string_to_rust(TISGetInputSourceProperty(source, kTISPropertyLocalizedName))
         }
         .unwrap_or_default();
 

@@ -1082,7 +1082,10 @@ fn flush_upsert_batch_if_full(
     flush_upsert_batch(batch, write_tx)
 }
 
-fn flush_upsert_batch(batch: &mut Vec<FileRecord>, write_tx: &Sender<WriteCommand>) -> EngineResult<()> {
+fn flush_upsert_batch(
+    batch: &mut Vec<FileRecord>,
+    write_tx: &Sender<WriteCommand>,
+) -> EngineResult<()> {
     if batch.is_empty() {
         return Ok(());
     }
