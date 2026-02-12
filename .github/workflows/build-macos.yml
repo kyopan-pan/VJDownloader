@@ -1,0 +1,63 @@
+name: Build macOS (自動ビルド)
+
+on:
+  # main ブランチへの push で自動ビルド
+  push:
+    branches: [ "main" ]
+  # GitHub 画面から手動実行
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # YtDownloader と同じ運用に合わせた macOS マトリクス
+        os: [ macos-14, macos-15, macos-26 ]
+        include:
+          - os: macos-14
+            arch: aarch64
+          - os: macos-15
+            arch: aarch64
+          - os: macos-26
+            arch: aarch64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code (ソース取得)
+        uses: actions/checkout@v4
+
+      # Rust ツールチェーンをセットアップ
+      - name: Set up Rust (Rust環境準備)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cargo のビルドキャッシュを利用して高速化
+      - name: Cache Cargo build (キャッシュ復元)
+        uses: Swatinem/rust-cache@v2
+
+      # Cargo.toml の version を取り出し、後続ステップで再利用
+      - name: Extract version from Cargo.toml (バージョン取得)
+        run: |
+          APP_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          echo "APP_VERSION=${APP_VERSION}" >> "${GITHUB_ENV}"
+          echo "Detected version: ${APP_VERSION}"
+
+      # リリース用バイナリをビルド
+      - name: Build release binary (リリースビルド)
+        run: cargo build --release --locked
+
+      # 配布しやすいようにバイナリを zip 化
+      - name: Create ZIP artifact (成果物をZIP化)
+        run: |
+          mkdir -p dist
+          cp target/release/VJDownloader dist/VJDownloader
+          chmod +x dist/VJDownloader
+          cd dist
+          zip "VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.zip" VJDownloader
+
+      # GitHub Actions の成果物としてアップロード
+      - name: Upload build artifact (成果物アップロード)
+        uses: actions/upload-artifact@v4
+        with:
+          name: VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}
+          path: dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.zip
