@@ -10,7 +10,16 @@ pub fn app_data_dir() -> PathBuf {
     home.join(".ytdownloader")
 }
 
+pub fn settings_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".vjdownloader")
+}
+
 pub fn settings_file_path() -> PathBuf {
+    settings_dir().join("settings.properties")
+}
+
+pub fn legacy_settings_file_path() -> PathBuf {
     app_data_dir().join("settings.properties")
 }
 

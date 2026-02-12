@@ -2,12 +2,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::paths::{default_download_dir, make_absolute_path, settings_file_path};
+use crate::paths::{
+    default_download_dir, legacy_settings_file_path, make_absolute_path, settings_file_path,
+};
 
 #[derive(Clone, Debug)]
 pub struct SettingsData {
     pub window_width: String,
     pub window_height: String,
+    pub download_panel_width: String,
+    pub search_panel_width: String,
     pub download_dir: String,
     pub search_roots: Vec<String>,
     pub cookies_enabled: bool,
@@ -27,6 +31,16 @@ impl SettingsData {
             props.get("window.height"),
             DEFAULT_WINDOW_HEIGHT,
             MIN_WINDOW_HEIGHT,
+        );
+        let download_panel_width = parse_dimension(
+            props.get("layout.download.width"),
+            DEFAULT_MAIN_PANEL_WIDTH,
+            MIN_MAIN_PANEL_WIDTH,
+        );
+        let search_panel_width = parse_dimension(
+            props.get("layout.search.width"),
+            DEFAULT_MAIN_PANEL_WIDTH,
+            MIN_MAIN_PANEL_WIDTH,
         );
         let download_dir = props
             .get("download.dir")
@@ -56,6 +70,8 @@ impl SettingsData {
         Self {
             window_width: format_dimension(window_width),
             window_height: format_dimension(window_height),
+            download_panel_width: format_dimension(download_panel_width),
+            search_panel_width: format_dimension(search_panel_width),
             download_dir,
             search_roots,
             cookies_enabled,
@@ -76,6 +92,14 @@ impl SettingsData {
         let mut lines = Vec::new();
         lines.push(format!("window.width={}", self.window_width.trim()));
         lines.push(format!("window.height={}", self.window_height.trim()));
+        lines.push(format!(
+            "layout.download.width={}",
+            self.download_panel_width.trim()
+        ));
+        lines.push(format!(
+            "layout.search.width={}",
+            self.search_panel_width.trim()
+        ));
         let download_dir = self.download_dir.trim();
         lines.push(format!("download.dir={download_dir}"));
         lines.push(format!(
@@ -136,11 +160,15 @@ pub fn load_cookie_args() -> Vec<String> {
 
 fn load_settings_properties() -> HashMap<String, String> {
     let path = settings_file_path();
+    if let Some(props) = read_properties_from_path(&path) {
+        return props;
+    }
+    read_properties_from_path(&legacy_settings_file_path()).unwrap_or_default()
+}
+
+fn read_properties_from_path(path: &PathBuf) -> Option<HashMap<String, String>> {
     let mut props = HashMap::new();
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(_) => return props,
-    };
+    let contents = fs::read_to_string(path).ok()?;
 
     for raw_line in contents.lines() {
         let line = raw_line.trim();
@@ -154,7 +182,7 @@ fn load_settings_properties() -> HashMap<String, String> {
             props.insert(key.to_string(), value.to_string());
         }
     }
-    props
+    Some(props)
 }
 
 fn parse_bool(raw: &str, fallback: bool) -> bool {
@@ -169,6 +197,8 @@ const DEFAULT_WINDOW_WIDTH: f32 = 860.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 1000.0;
 const MIN_WINDOW_WIDTH: f32 = 320.0;
 const MIN_WINDOW_HEIGHT: f32 = 320.0;
+const DEFAULT_MAIN_PANEL_WIDTH: f32 = 430.0;
+const MIN_MAIN_PANEL_WIDTH: f32 = 1.0;
 
 fn parse_dimension(raw: Option<&String>, fallback: f32, min: f32) -> f32 {
     let Some(raw) = raw else {

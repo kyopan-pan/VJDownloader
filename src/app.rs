@@ -71,6 +71,8 @@ pub struct DownloaderApp {
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
     pub(crate) current_window_size: Option<egui::Vec2>,
+    pub(crate) download_panel_width: f32,
+    pub(crate) search_panel_width: f32,
     pub(crate) search_query: String,
     pub(crate) search_results: Vec<SearchHit>,
     pub(crate) search_error: Option<String>,
@@ -90,7 +92,16 @@ impl DownloaderApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
         let settings = SettingsData::load();
+        let window_width = settings.window_width.parse::<f32>().unwrap_or(860.0);
         let download_dir = PathBuf::from(settings.download_dir.trim());
+        let download_panel_width = settings
+            .download_panel_width
+            .parse::<f32>()
+            .unwrap_or(window_width * 0.5);
+        let search_panel_width = settings
+            .search_panel_width
+            .parse::<f32>()
+            .unwrap_or(window_width * 0.5);
         let search_engine = SearchEngine::new(search_index_db_path()).ok();
         let mut search_roots_sync_error = None;
 
@@ -134,6 +145,8 @@ impl DownloaderApp {
             pending_window_resize: None,
             did_snap: false,
             current_window_size: None,
+            download_panel_width,
+            search_panel_width,
             search_query: String::new(),
             search_results: Vec::new(),
             search_error: None,
@@ -532,12 +545,14 @@ impl eframe::App for DownloaderApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let mut data = SettingsData::load();
         if let Some(size) = self.current_window_size {
-            let mut data = SettingsData::load();
             data.window_width = format_dimension(size.x.max(320.0));
             data.window_height = format_dimension(size.y.max(320.0));
-            let _ = save_settings(&data);
         }
+        data.download_panel_width = format_dimension(self.download_panel_width.max(1.0));
+        data.search_panel_width = format_dimension(self.search_panel_width.max(1.0));
+        let _ = save_settings(&data);
     }
 }
 

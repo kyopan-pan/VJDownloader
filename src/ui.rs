@@ -6,6 +6,9 @@ use crate::cursor::pointing;
 use crate::log_ui;
 use crate::settings_ui;
 
+const PANEL_MIN_WIDTH: f32 = 120.0;
+const DOWNLOAD_PANEL_MAX_RATIO: f32 = 0.5;
+
 pub fn render(
     // UI全体の状態とアクションの入口
     app: &mut DownloaderApp,
@@ -19,21 +22,31 @@ pub fn render(
     let panel_frame = egui::Frame::NONE
         .fill(panel_bg)
         .inner_margin(egui::Margin::symmetric(16, 16));
+    let available_width = ctx.available_rect().width().max(1.0);
+    let max_download_width = (available_width * DOWNLOAD_PANEL_MAX_RATIO).max(1.0);
+    let min_download_width = PANEL_MIN_WIDTH.min(max_download_width);
+    let saved_total_width = (app.download_panel_width + app.search_panel_width).max(1.0);
+    let saved_download_ratio = (app.download_panel_width / saved_total_width)
+        .clamp(0.0, DOWNLOAD_PANEL_MAX_RATIO);
+    let default_download_width =
+        (available_width * saved_download_ratio).clamp(min_download_width, max_download_width);
 
-    egui::SidePanel::left("download_section")
+    let download_panel = egui::SidePanel::left("download_section")
         .resizable(true)
-        .default_width(360.0)
-        .min_width(280.0)
+        .default_width(default_download_width)
+        .width_range(min_download_width..=max_download_width)
         .frame(panel_frame.clone())
         .show(ctx, |ui| {
             render_download_section(ui, ctx, app, frame);
         });
 
-    egui::CentralPanel::default()
+    let search_panel = egui::CentralPanel::default()
         .frame(panel_frame)
         .show(ctx, |ui| {
             render_search_section(ui, ctx, app, frame);
         });
+    app.download_panel_width = download_panel.response.rect.width().max(1.0);
+    app.search_panel_width = search_panel.response.rect.width().max(1.0);
 
     settings_ui::render_windows(app, ctx);
     log_ui::render_log_viewport(app, ctx);
@@ -430,8 +443,12 @@ fn render_file_row(
         }
     }
 
-    let drag_response = pointing(ui.interact(drag_rect, drag_id, egui::Sense::drag()));
-    if drag_response.drag_started() {
+    let drag_response = pointing(ui.interact(
+        drag_rect,
+        drag_id,
+        egui::Sense::click_and_drag(),
+    ));
+    if drag_response.drag_started_by(egui::PointerButton::Primary) {
         app.start_native_drag(frame, drag_path);
     }
 
