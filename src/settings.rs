@@ -9,6 +9,7 @@ pub struct SettingsData {
     pub window_width: String,
     pub window_height: String,
     pub download_dir: String,
+    pub search_roots: Vec<String>,
     pub cookies_enabled: bool,
     pub cookies_browser: String,
     pub cookies_profile: String,
@@ -33,6 +34,13 @@ impl SettingsData {
             .unwrap_or_else(default_download_dir)
             .to_string_lossy()
             .to_string();
+        let search_roots = props
+            .get("search.roots")
+            .map(|value| decode_path_list(value))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|raw| normalize_dir(&raw).to_string_lossy().to_string())
+            .collect();
         let cookies_enabled = props
             .get("cookies.from_browser.enabled")
             .map(|v| parse_bool(v, false))
@@ -49,6 +57,7 @@ impl SettingsData {
             window_width: format_dimension(window_width),
             window_height: format_dimension(window_height),
             download_dir,
+            search_roots,
             cookies_enabled,
             cookies_browser,
             cookies_profile,
@@ -70,8 +79,16 @@ impl SettingsData {
         let download_dir = self.download_dir.trim();
         lines.push(format!("download.dir={download_dir}"));
         lines.push(format!(
+            "search.roots={}",
+            encode_path_list(&self.search_roots)
+        ));
+        lines.push(format!(
             "cookies.from_browser.enabled={}",
-            if self.cookies_enabled { "true" } else { "false" }
+            if self.cookies_enabled {
+                "true"
+            } else {
+                "false"
+            }
         ));
         lines.push(format!(
             "cookies.from_browser.browser={}",
@@ -148,9 +165,9 @@ fn parse_bool(raw: &str, fallback: bool) -> bool {
     trimmed.eq_ignore_ascii_case("true")
 }
 
-const DEFAULT_WINDOW_WIDTH: f32 = 300.0;
+const DEFAULT_WINDOW_WIDTH: f32 = 860.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 1000.0;
-const MIN_WINDOW_WIDTH: f32 = 260.0;
+const MIN_WINDOW_WIDTH: f32 = 640.0;
 const MIN_WINDOW_HEIGHT: f32 = 320.0;
 
 fn parse_dimension(raw: Option<&String>, fallback: f32, min: f32) -> f32 {
@@ -179,4 +196,49 @@ fn normalize_dir(value: &str) -> PathBuf {
         return default_download_dir();
     }
     make_absolute_path(trimmed)
+}
+
+fn encode_path_list(paths: &[String]) -> String {
+    let mut encoded = Vec::new();
+    for path in paths {
+        let mut escaped = String::new();
+        for ch in path.chars() {
+            match ch {
+                '\\' => escaped.push_str("\\\\"),
+                '|' => escaped.push_str("\\|"),
+                _ => escaped.push(ch),
+            }
+        }
+        encoded.push(escaped);
+    }
+    encoded.join("|")
+}
+
+fn decode_path_list(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut escape = false;
+    for ch in raw.chars() {
+        if escape {
+            buf.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' => escape = true,
+            '|' => {
+                let trimmed = buf.trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.to_string());
+                }
+                buf.clear();
+            }
+            _ => buf.push(ch),
+        }
+    }
+    let trimmed = buf.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+    out
 }

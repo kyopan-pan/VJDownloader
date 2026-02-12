@@ -39,12 +39,12 @@
 - クッキー取得はyt-dlpの`--cookies-from-browser`オプションとして渡す。
 
 ## 内部パス
-- アプリ用データは`~/.vjdownloader`配下を使用する。
-- `~/.vjdownloader/bin`にツール用のバイナリを配置する。
-- yt-dlpは`~/.vjdownloader/bin/yt-dlp`に保存する。
-- ffmpegは`~/.vjdownloader/bin/ffmpeg`を参照する。
-- ffprobeは`~/.vjdownloader/bin/ffprobe`を参照する。
-- denoは`~/.vjdownloader/bin/deno`を参照する。
+- アプリ用データは`~/.ytdownloader`配下を使用する。
+- `~/.ytdownloader/bin`にツール用のバイナリを配置する。
+- yt-dlpは`~/.ytdownloader/bin/yt-dlp`に保存する。
+- ffmpegは`~/.ytdownloader/bin/ffmpeg`を参照する。
+- ffprobeは`~/.ytdownloader/bin/ffprobe`を参照する。
+- denoは`~/.ytdownloader/bin/deno`を参照する。
 
 ## ダウンロード開始
 - ダウンロード開始はクリップボードの文字列をそのままURLとして利用する。
@@ -132,6 +132,7 @@
 - `Status`セクションは折りたたみ式で、初期状態は閉じている。
 - ログは下方向にスクロール可能で、最大表示高は120px。
 - `ログをクリア`ボタンでログを削除し、`ログをクリアしました。`を追加する。
+- macOSでは入力ソース変更を監視し、日本語入力に切り替わった場合は`日本語になりました`、英字入力（ABC）に切り替わった場合は`英字になりました`をログ出力する。
 
 ## UIテキスト
 - メインボタンの表示は待機時`Download`、ダウンロード中は`Stop`。
@@ -151,3 +152,57 @@
 - yt-dlp起動失敗時はダウンロード失敗として扱う。
 - ファイル削除失敗時はステータスに`削除に失敗しました: <error>`を表示する。
 - ドラッグ開始失敗時はステータスにエラーを表示する。
+
+## mp4検索インデックス（SQLite）
+- mp4検索は`~/.ytdownloader/search_index.sqlite3`のSQLiteインデックスを使用する。
+- `roots`テーブルで検索対象ルートフォルダを管理し、`files`テーブルでmp4ファイル情報を管理する。
+- `files`には`path`（PK）、`root_id`、`file_name`、`file_name_norm`、`parent_dir`、`size_bytes`、`modified_time`、`created_time`、`last_indexed_time`を保持する。
+- `roots`には`root_id`（PK）、`root_path`、`is_enabled`、`last_scan_time`を保持する。
+- `files.root_id`、`files.parent_dir`、`files.file_name_norm`、`files.modified_time`、`files.size_bytes`にインデックスを作成する。
+
+## 検索対象フォルダ設定
+- 設定キー`search.roots`に検索対象ルートフォルダ（複数）を保存する。
+- 設定画面から検索対象フォルダを追加・削除できる。
+- 設定保存時に検索対象ルートをDBへ同期し、新規追加ルートはバックグラウンドでフルスキャンする。
+- 設定画面の`全体を再インデックス`で全ルートを再スキャンできる。
+
+## 検索仕様（インデックス検索）
+- 検索はインデックス方式で行い、検索時にフォルダ全体のフルスキャンは行わない。
+- クエリは`file_name_norm`に対して部分一致検索を行う。
+- 非空クエリでは2段階検索を行う。
+- 第1段階は前方一致（`query%`）で検索し、足りない場合に第2段階の部分一致（`%query%`）で補完する。
+- `%`と`_`を含むクエリはLIKEエスケープしてリテラルとして扱う。
+- クエリが空の場合は更新日時降順、非空の場合は名前順で返す。
+- メタデータ条件として`root_id/root_path`、`parent_dir`、`modified_time`範囲、`size_bytes`範囲、`limit`、`sort`を検索APIで受け付ける。
+
+## 検索UI
+- 検索結果はダウンロード一覧と同じ行UIで表示し、表示内容はファイル名のみとする。
+- 検索結果行には削除ボタンを表示しない。
+- 検索結果行のドラッグでmacOSネイティブのファイルドラッグを開始し、VDMXへドロップできる。
+- 検索クエリが空のときは、結果リスト内に何も表示しない。
+- ヒット0件時はリスト枠内に`該当するファイルはありませんでした`を表示する。
+- 検索入力中の選択ハイライトは強い青色を使わず、目立たない配色にする。
+
+## 日本語検索の扱い
+- 検索用正規化はNFKC + 小文字化（英字吸収）を適用する。
+- 正規化は`src/search_index.rs`の`normalize_for_search`で実装する。
+- 日本語の表記ゆれ（互換文字・結合文字）をある程度吸収するが、意味的同義語や読み仮名変換は対象外。
+
+## 監視更新とフォールバック
+- `notify`による再帰監視でルート配下の差分を取り込み、DBを更新する。
+- 監視イベントはデバウンス（700ms）してまとめて処理する。
+- renameは旧パス削除＋新パス追加として処理する。
+- deleteはファイル削除またはディレクトリ配下削除として処理する。
+- 監視エラー発生時はフォールバックとして有効ルートの再スキャンを行う。
+
+## 並行処理とDBアクセス
+- SQLite書き込みは単一ライタースレッド（キュー経由）に集約する。
+- 検索は別スレッドで実行し、入力連打時は最新クエリを優先して古い要求を破棄する。
+- DBはWALモードを使用し、検索と更新の並行実行時の待ちを低減する。
+
+## 実装デフォルト値と変更方法
+- 検索正規化方式: `normalize_for_search`（NFKC + lower）
+- 監視デバウンス: `DEBOUNCE_WINDOW`（700ms）
+- バッチupsert件数: `UPSERT_BATCH_SIZE`（256）
+- 最大検索件数: `MAX_SEARCH_LIMIT`（1000）
+- これらは`src/search_index.rs`内の定数または関数を変更することで調整できる。

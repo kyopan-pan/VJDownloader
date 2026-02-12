@@ -10,7 +10,7 @@ use crate::download::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
 use crate::fs_utils::is_executable;
 use crate::mac_file_dialog;
 use crate::paths::{default_download_dir, deno_path, make_absolute_path, yt_dlp_path};
-use crate::settings::{save_settings, SettingsData};
+use crate::settings::{SettingsData, save_settings};
 
 #[derive(Clone, Copy, Debug)]
 enum ToolKind {
@@ -438,7 +438,7 @@ fn render_settings_contents(
                     );
                     ui.label(
                         egui::RichText::new(
-                            "ウィンドウサイズ、保存先、依存ツールの状態をまとめて管理します。",
+                            "ウィンドウサイズ、保存先、検索対象、依存ツールの状態をまとめて管理します。",
                         )
                         .size(12.0)
                         .color(egui::Color32::from_rgb(140, 150, 170)),
@@ -448,6 +448,15 @@ fn render_settings_contents(
                     render_window_section(ui, &mut app.settings_ui);
                     ui.add_space(10.0);
                     render_cookie_section(ui, &mut app.settings_ui);
+                    ui.add_space(10.0);
+                    let request_reindex = render_search_roots_section(ui, &mut app.settings_ui);
+                    if request_reindex {
+                        if let Err(err) = app.request_reindex_all() {
+                            app.settings_ui.form.error = Some(err);
+                        } else {
+                            app.settings_ui.form.error = None;
+                        }
+                    }
 
                     ui.add_space(12.0);
                     render_tool_card(
@@ -486,8 +495,19 @@ fn render_settings_contents(
                                 ) {
                                     app.settings_ui.form.error = Some(err);
                                 } else {
-                                    app.settings_ui.form.error = None;
-                                    *should_close = true;
+                                    let roots = app.settings_ui.form.data.search_roots.clone();
+                                    match app.sync_search_roots(&roots) {
+                                        Ok(()) => {
+                                            app.settings_ui.form.error = None;
+                                            app.mark_search_dirty();
+                                            *should_close = true;
+                                        }
+                                        Err(err) => {
+                                            app.settings_ui.form.error = Some(format!(
+                                                "検索対象フォルダの同期に失敗しました: {err}"
+                                            ));
+                                        }
+                                    }
                                 }
                             }
 
@@ -658,6 +678,108 @@ fn render_cookie_section(
         });
 }
 
+fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -> bool {
+    let panel_fill = egui::Color32::from_rgb(20, 26, 40);
+    let panel_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78));
+    let mut should_reindex = false;
+    let mut remove_index = None;
+    let mut add_directory = None;
+
+    egui::Frame::NONE
+        .fill(panel_fill)
+        .stroke(panel_stroke)
+        .corner_radius(egui::CornerRadius::same(16))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("検索対象フォルダ")
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(200, 210, 230)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let btn = egui::Button::new(
+                        egui::RichText::new("全体を再インデックス")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(8, 14, 24)),
+                    )
+                    .fill(egui::Color32::from_rgb(16, 190, 255));
+                    if ui.add(btn).clicked() {
+                        should_reindex = true;
+                    }
+                });
+            });
+            ui.label(
+                egui::RichText::new("mp4検索対象のルートフォルダを複数指定できます。")
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(140, 150, 170)),
+            );
+            ui.add_space(8.0);
+
+            let btn = egui::Button::new(
+                egui::RichText::new("フォルダを追加")
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(180, 200, 220)),
+            )
+            .fill(egui::Color32::from_rgb(26, 34, 52));
+            if ui.add(btn).clicked() {
+                let current = state.form.data.search_roots.last().map(PathBuf::from);
+                add_directory = mac_file_dialog::choose_directory(current.as_deref());
+            }
+
+            ui.add_space(6.0);
+            if state.form.data.search_roots.is_empty() {
+                ui.label(
+                    egui::RichText::new("検索対象フォルダが未設定です。")
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(120, 130, 150)),
+                );
+            } else {
+                for (index, root) in state.form.data.search_roots.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(root)
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(170, 180, 200)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let remove_btn = egui::Button::new(
+                                egui::RichText::new("削除")
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(248, 113, 113)),
+                            )
+                            .fill(egui::Color32::from_rgb(45, 26, 34));
+                            if ui.add(remove_btn).clicked() {
+                                remove_index = Some(index);
+                            }
+                        });
+                    });
+                }
+            }
+        });
+
+    if let Some(path) = add_directory {
+        let value = path.to_string_lossy().to_string();
+        if !state
+            .form
+            .data
+            .search_roots
+            .iter()
+            .any(|existing| existing == &value)
+        {
+            state.form.data.search_roots.push(value);
+        }
+    }
+
+    if let Some(index) = remove_index {
+        if index < state.form.data.search_roots.len() {
+            state.form.data.search_roots.remove(index);
+        }
+    }
+
+    should_reindex
+}
+
 fn render_tool_card(
     // ツールカードの描画先
     ui: &mut egui::Ui,
@@ -826,6 +948,7 @@ fn apply_settings_changes(
     data.window_width = format_dimension(width);
     data.window_height = format_dimension(height);
     data.download_dir = actual_dir.to_string_lossy().to_string();
+    data.search_roots = normalize_search_roots(&data.search_roots)?;
     save_settings(&data)?;
 
     state.form.data = data;
@@ -833,6 +956,28 @@ fn apply_settings_changes(
     *refresh_needed = true;
     *pending_resize = Some(egui::vec2(width, height));
     Ok(())
+}
+
+fn normalize_search_roots(roots: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for root in roots {
+        let trimmed = root.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let absolute = make_absolute_path(trimmed);
+        if !absolute.is_dir() {
+            return Err(format!(
+                "検索対象フォルダがディレクトリではありません: {}",
+                absolute.to_string_lossy()
+            ));
+        }
+        let normalized = absolute.to_string_lossy().to_string();
+        if !out.iter().any(|existing| existing == &normalized) {
+            out.push(normalized);
+        }
+    }
+    Ok(out)
 }
 
 fn parse_dimension_input(raw: &str) -> Option<f32> {

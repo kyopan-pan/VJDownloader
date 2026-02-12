@@ -14,6 +14,10 @@ pub fn settings_file_path() -> PathBuf {
     app_data_dir().join("settings.properties")
 }
 
+pub fn search_index_db_path() -> PathBuf {
+    app_data_dir().join("search_index.sqlite3")
+}
+
 pub fn make_absolute_path(raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {

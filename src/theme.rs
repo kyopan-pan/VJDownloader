@@ -17,7 +17,9 @@ pub fn apply_theme(
     style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(10);
     style.visuals.widgets.inactive.fg_stroke =
         egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 70, 90));
-    style.visuals.selection.bg_fill = egui::Color32::from_rgb(16, 190, 255);
+    // 日本語IMEの変換中ハイライトが強く出ないようにしつつ、選択文字は白で可読性を保つ。
+    style.visuals.selection.bg_fill = egui::Color32::from_rgb(52, 62, 84);
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
     style.visuals.hyperlink_color = egui::Color32::from_rgb(16, 190, 255);
     style.spacing.item_spacing = egui::vec2(12.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 10.0);

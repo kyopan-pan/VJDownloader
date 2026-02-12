@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -159,10 +159,16 @@ impl ProcessTracker {
             pids.clone()
         };
         for pid in &pids {
-            let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
         }
         for pid in &pids {
-            let _ = Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(pid.to_string())
+                .status();
         }
     }
 }
@@ -245,14 +251,7 @@ fn run_download_inner(
     args.push(output_template.to_string_lossy().to_string());
     args.push(url.clone());
 
-    let status = run_yt_dlp(
-        &yt_dlp_path,
-        &args,
-        tx,
-        progress.clone(),
-        true,
-        tracker,
-    );
+    let status = run_yt_dlp(&yt_dlp_path, &args, tx, progress.clone(), true, tracker);
     match status {
         Ok(code) if code.success() => return Ok(()),
         Ok(_) => {
@@ -344,7 +343,8 @@ pub fn ensure_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
     }
 
     let zip_path = bin.join("deno.zip");
-    let url = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip";
+    let url =
+        "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip";
     curl_download(url, &zip_path, "deno")?;
 
     let status = Command::new("unzip")
@@ -367,7 +367,9 @@ pub fn ensure_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
 
     ensure_executable(&deno)?;
     if let Some(tx) = tx {
-        let _ = tx.send(DownloadEvent::Log("denoをダウンロードしました。".to_string()));
+        let _ = tx.send(DownloadEvent::Log(
+            "denoをダウンロードしました。".to_string(),
+        ));
     }
     Ok(deno)
 }
@@ -511,9 +513,7 @@ fn fallback_yt_dlp_args(ffmpeg_path: &str, cookie_args: &[String]) -> Vec<String
     args.push("--recode-video".to_string());
     args.push("mp4".to_string());
     args.push("--postprocessor-args".to_string());
-    args.push(
-        "VideoConvertor:-c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p".to_string(),
-    );
+    args.push("VideoConvertor:-c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p".to_string());
     args.push("--ffmpeg-location".to_string());
     args.push(ffmpeg_path.to_string());
     args.push("--js-runtimes".to_string());
@@ -866,7 +866,10 @@ fn run_yt_dlp(
     tracker: &ProcessTracker,
 ) -> Result<std::process::ExitStatus, String> {
     let mut command = Command::new(yt_dlp_path);
-    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     if add_bin_to_path {
         let bin = bin_dir();
@@ -941,7 +944,11 @@ fn spawn_stream_thread<R: Read + Send + 'static>(
     }
 }
 
-fn handle_stream_line(line: String, tx: &mpsc::Sender<DownloadEvent>, progress: &Arc<ProgressContext>) {
+fn handle_stream_line(
+    line: String,
+    tx: &mpsc::Sender<DownloadEvent>,
+    progress: &Arc<ProgressContext>,
+) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;

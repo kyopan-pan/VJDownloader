@@ -1,31 +1,33 @@
+use crate::bundled::ensure_bundled_tools;
+use crate::download::{
+    CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressUpdate, ensure_deno, ensure_yt_dlp,
+    read_clipboard_text, run_download,
+};
+use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
+use crate::mac_input_source::{InputMode, current_mode};
+use crate::mac_menu;
+use crate::paths::{search_index_db_path, yt_dlp_path};
+use crate::search_index::{SearchEngine, SearchHit, SearchRequest, SearchSort};
+use crate::settings::{SettingsData, load_cookie_args, save_settings};
+use crate::settings_ui;
+use crate::theme::apply_theme;
+use crate::ui;
 use drag::{DragItem, Image, Options};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-use crate::bundled::ensure_bundled_tools;
-use crate::download::{
-    ensure_deno, ensure_yt_dlp, read_clipboard_text, run_download, DownloadEvent, ProcessTracker,
-    ProgressUpdate, CANCELLED_ERROR,
-};
-use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
-use crate::mac_menu;
-use crate::paths::yt_dlp_path;
-use crate::settings::{load_cookie_args, save_settings, SettingsData};
-use crate::settings_ui;
-use crate::theme::apply_theme;
-use crate::ui;
 
 pub fn run() -> eframe::Result<()> {
     let settings = SettingsData::load();
-    let window_width = settings.window_width.parse::<f32>().unwrap_or(300.0);
+    let window_width = settings.window_width.parse::<f32>().unwrap_or(860.0);
     let window_height = settings.window_height.parse::<f32>().unwrap_or(1000.0);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([window_width, window_height])
-            .with_min_inner_size([260.0, 320.0])
+            .with_min_inner_size([640.0, 320.0])
             .with_always_on_top(),
         ..Default::default()
     };
@@ -35,6 +37,17 @@ pub fn run() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(DownloaderApp::new(cc)))),
     )
+}
+
+#[derive(Clone)]
+struct SearchJob {
+    seq: u64,
+    request: SearchRequest,
+}
+
+struct SearchJobResult {
+    seq: u64,
+    result: Result<Vec<SearchHit>, String>,
 }
 
 pub struct DownloaderApp {
@@ -54,6 +67,17 @@ pub struct DownloaderApp {
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
     pub(crate) current_window_size: Option<egui::Vec2>,
+    pub(crate) search_query: String,
+    pub(crate) search_results: Vec<SearchHit>,
+    pub(crate) search_error: Option<String>,
+    pub(crate) search_engine: Option<SearchEngine>,
+    pub(crate) search_roots_sync_error: Option<String>,
+    search_job_tx: Option<mpsc::Sender<SearchJob>>,
+    search_result_rx: Option<mpsc::Receiver<SearchJobResult>>,
+    search_request_seq: u64,
+    applied_search_seq: u64,
+    search_dirty: bool,
+    last_input_mode: Option<InputMode>,
 }
 
 impl DownloaderApp {
@@ -61,6 +85,29 @@ impl DownloaderApp {
         apply_theme(&cc.egui_ctx);
         let settings = SettingsData::load();
         let download_dir = PathBuf::from(settings.download_dir.trim());
+        let search_engine = SearchEngine::new(search_index_db_path()).ok();
+        let mut search_roots_sync_error = None;
+
+        if let Some(engine) = search_engine.as_ref() {
+            let root_paths = settings
+                .search_roots
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+            if let Err(err) = engine.sync_roots(&root_paths) {
+                search_roots_sync_error = Some(err);
+            }
+            let _ = engine.reindex_all_async();
+        }
+
+        let (search_job_tx, search_result_rx) = if let Some(engine) = search_engine.clone() {
+            let (job_tx, job_rx) = mpsc::channel::<SearchJob>();
+            let (result_tx, result_rx) = mpsc::channel::<SearchJobResult>();
+            thread::spawn(move || search_worker_loop(engine, job_rx, result_tx));
+            (Some(job_tx), Some(result_rx))
+        } else {
+            (None, None)
+        };
 
         let mut app = Self {
             download_dir,
@@ -79,6 +126,17 @@ impl DownloaderApp {
             pending_window_resize: None,
             did_snap: false,
             current_window_size: None,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_error: None,
+            search_engine,
+            search_roots_sync_error,
+            search_job_tx,
+            search_result_rx,
+            search_request_seq: 0,
+            applied_search_seq: 0,
+            search_dirty: true,
+            last_input_mode: None,
         };
 
         mac_menu::install_settings_menu();
@@ -91,6 +149,13 @@ impl DownloaderApp {
             let _ = ensure_yt_dlp(None);
             let _ = ensure_deno(None);
         });
+
+        if app.search_engine.is_none() {
+            app.search_error = Some("検索エンジンの初期化に失敗しました。".to_string());
+        }
+        if let Some(err) = app.search_roots_sync_error.clone() {
+            app.search_error = Some(format!("検索対象フォルダの同期に失敗しました: {err}"));
+        }
 
         app
     }
@@ -107,7 +172,8 @@ impl DownloaderApp {
 
         if !self.is_tools_ready() {
             self.push_status(
-                "初回セットアップが必要です。設定から自動セットアップを行ってください。".to_string(),
+                "初回セットアップが必要です。設定から自動セットアップを行ってください。"
+                    .to_string(),
             );
             self.settings_ui.open_initial_setup();
             return;
@@ -124,14 +190,19 @@ impl DownloaderApp {
         self.cancel_flag = Some(cancel_flag.clone());
         self.process_tracker = Some(tracker.clone());
 
-        self.push_status(format!(
-            "Downloading to {}",
-            output_dir.to_string_lossy()
-        ));
+        self.push_status(format!("Downloading to {}", output_dir.to_string_lossy()));
 
         let active_flag = self.download_active_flag.clone();
         thread::spawn(move || {
-            run_download(url, output_dir, cookie_args, tx, active_flag, cancel_flag, tracker)
+            run_download(
+                url,
+                output_dir,
+                cookie_args,
+                tx,
+                active_flag,
+                cancel_flag,
+                tracker,
+            )
         });
     }
 
@@ -182,6 +253,32 @@ impl DownloaderApp {
         ) {
             self.push_status(format!("ドラッグ開始に失敗しました: {err}"));
         }
+    }
+
+    pub(crate) fn mark_search_dirty(&mut self) {
+        self.search_dirty = true;
+    }
+
+    pub(crate) fn sync_search_roots(&mut self, roots: &[String]) -> Result<(), String> {
+        let Some(engine) = self.search_engine.as_ref() else {
+            return Err(
+                "検索エンジンが初期化されていません。アプリを再起動してください。".to_string(),
+            );
+        };
+        let paths = roots.iter().map(PathBuf::from).collect::<Vec<_>>();
+        engine.sync_roots(&paths)?;
+        self.search_roots_sync_error = None;
+        self.search_dirty = true;
+        Ok(())
+    }
+
+    pub(crate) fn request_reindex_all(&mut self) -> Result<(), String> {
+        let Some(engine) = self.search_engine.as_ref() else {
+            return Err("検索エンジンが初期化されていません。".to_string());
+        };
+        engine.reindex_all_async()?;
+        self.search_dirty = true;
+        Ok(())
     }
 
     fn poll_download_events(&mut self) {
@@ -246,6 +343,100 @@ impl DownloaderApp {
     fn is_tools_ready(&self) -> bool {
         self.is_yt_dlp_ready()
     }
+
+    fn poll_input_mode_change(&mut self) {
+        let Some(mode) = current_mode() else {
+            return;
+        };
+
+        if self.last_input_mode.is_none() {
+            self.last_input_mode = Some(mode);
+            return;
+        }
+
+        if self.last_input_mode.as_ref() == Some(&mode) {
+            return;
+        }
+
+        self.last_input_mode = Some(mode.clone());
+        match mode {
+            InputMode::Japanese => self.push_status("日本語になりました".to_string()),
+            InputMode::English => self.push_status("英字になりました".to_string()),
+            InputMode::Other(name) => self.push_status(format!("入力ソースが変更されました: {name}")),
+        }
+    }
+
+    fn submit_search_if_needed(&mut self) {
+        if !self.search_dirty {
+            return;
+        }
+
+        if self.search_query.trim().is_empty() {
+            self.search_results.clear();
+            let has_persistent_search_error =
+                self.search_engine.is_none() || self.search_roots_sync_error.is_some();
+            if !has_persistent_search_error {
+                self.search_error = None;
+            }
+            self.search_dirty = false;
+            return;
+        }
+
+        let Some(tx) = self.search_job_tx.as_ref() else {
+            return;
+        };
+
+        self.search_request_seq = self.search_request_seq.saturating_add(1);
+        let seq = self.search_request_seq;
+        let sort = if self.search_query.trim().is_empty() {
+            SearchSort::ModifiedDesc
+        } else {
+            SearchSort::NameAsc
+        };
+        let request = SearchRequest {
+            query: self.search_query.clone(),
+            limit: 200,
+            sort,
+            ..Default::default()
+        };
+
+        if tx.send(SearchJob { seq, request }).is_ok() {
+            self.search_dirty = false;
+        } else {
+            self.search_error =
+                Some("検索ワーカーにリクエストを送信できませんでした。".to_string());
+        }
+    }
+
+    fn poll_search_results(&mut self) {
+        let Some(rx) = self.search_result_rx.as_ref() else {
+            return;
+        };
+
+        let mut latest_result = None;
+        while let Ok(result) = rx.try_recv() {
+            latest_result = Some(result);
+        }
+
+        let Some(result) = latest_result else {
+            return;
+        };
+        if result.seq < self.applied_search_seq {
+            return;
+        }
+
+        self.applied_search_seq = result.seq;
+        match result.result {
+            Ok(hits) => {
+                self.search_results = hits;
+                self.search_error = None;
+            }
+            Err(err) => {
+                self.search_results.clear();
+                self.search_error = Some(err);
+            }
+        }
+    }
 }
 
 impl eframe::App for DownloaderApp {
@@ -258,7 +449,8 @@ impl eframe::App for DownloaderApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
         if !self.did_snap {
-            let (monitor_size, inner_rect) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().inner_rect));
+            let (monitor_size, inner_rect) =
+                ctx.input(|i| (i.viewport().monitor_size, i.viewport().inner_rect));
             if let (Some(monitor_size), Some(inner_rect)) = (monitor_size, inner_rect) {
                 let margin = 12.0;
                 let x = (monitor_size.x - inner_rect.width() - margin).max(0.0);
@@ -269,17 +461,43 @@ impl eframe::App for DownloaderApp {
         }
         self.settings_ui.poll_tool_updates();
         self.settings_ui.auto_refresh_if_needed();
+        self.poll_input_mode_change();
         self.poll_download_events();
         self.refresh_downloads_if_needed();
+        self.poll_search_results();
+        self.submit_search_if_needed();
         ui::render(self, ctx, _frame);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(size) = self.current_window_size {
             let mut data = SettingsData::load();
-            data.window_width = format_dimension(size.x.max(260.0));
+            data.window_width = format_dimension(size.x.max(640.0));
             data.window_height = format_dimension(size.y.max(320.0));
             let _ = save_settings(&data);
+        }
+    }
+}
+
+fn search_worker_loop(
+    engine: SearchEngine,
+    rx: mpsc::Receiver<SearchJob>,
+    tx: mpsc::Sender<SearchJobResult>,
+) {
+    while let Ok(mut job) = rx.recv() {
+        while let Ok(newer) = rx.try_recv() {
+            job = newer;
+        }
+
+        let result = engine.search(&job.request);
+        if tx
+            .send(SearchJobResult {
+                seq: job.seq,
+                result,
+            })
+            .is_err()
+        {
+            return;
         }
     }
 }

@@ -1,13 +1,13 @@
 #[cfg(target_os = "macos")]
 mod imp {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
-    use objc2::{msg_send_id, sel, ClassType};
-    use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem, NSEventModifierFlags};
-    use objc2_foundation::{MainThreadMarker, NSString, NSObject};
+    use objc2::{ClassType, msg_send, sel};
+    use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+    use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 
     static OPEN_SETTINGS_REQUEST: AtomicBool = AtomicBool::new(false);
     static MENU_INSTALLED: OnceLock<()> = OnceLock::new();
@@ -28,17 +28,18 @@ mod imp {
             return;
         };
         let app = NSApplication::sharedApplication(mtm);
-        let Some(main_menu) = (unsafe { app.mainMenu() }) else {
+        let Some(main_menu) = app.mainMenu() else {
             return;
         };
-        let Some(app_item) = (unsafe { main_menu.itemAtIndex(0) }) else {
+        let Some(app_item) = main_menu.itemAtIndex(0) else {
             return;
         };
-        let Some(app_menu) = (unsafe { app_item.submenu() }) else {
+        let Some(app_menu) = app_item.submenu() else {
             return;
         };
 
-        let target_ptr = MENU_TARGET.get_or_init(|| Retained::into_raw(create_menu_target()) as usize);
+        let target_ptr =
+            MENU_TARGET.get_or_init(|| Retained::into_raw(create_menu_target()) as usize);
         let target = unsafe { &*(*target_ptr as *mut AnyObject) };
 
         if let Some(existing_item) = find_existing_preferences(&app_menu) {
@@ -53,31 +54,29 @@ mod imp {
         let item = mtm.alloc::<NSMenuItem>();
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
-            item,
-            &title,
-            Some(sel!(openSettings:)),
-            &key_equivalent,
+                item,
+                &title,
+                Some(sel!(openSettings:)),
+                &key_equivalent,
             )
         };
         unsafe {
             item.setTarget(Some(target));
         }
-        item.setKeyEquivalentModifierMask(NSEventModifierFlags::NSEventModifierFlagCommand);
+        item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
 
-        let count = unsafe { app_menu.numberOfItems() };
+        let count = app_menu.numberOfItems();
         let insert_index = if count > 1 { 1 } else { count };
-        unsafe {
-            app_menu.insertItem_atIndex(&item, insert_index);
-        }
+        app_menu.insertItem_atIndex(&item, insert_index);
     }
 
     fn find_existing_preferences(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
         let titles = ["設定...", "Preferences...", "環境設定..."];
         for title in titles {
             let ns_title = NSString::from_str(title);
-            let index = unsafe { menu.indexOfItemWithTitle(&ns_title) };
+            let index = { menu.indexOfItemWithTitle(&ns_title) };
             if index >= 0 {
-                return unsafe { menu.itemAtIndex(index) };
+                return menu.itemAtIndex(index);
             }
         }
         None
@@ -85,7 +84,7 @@ mod imp {
 
     fn create_menu_target() -> Retained<AnyObject> {
         let cls = menu_target_class();
-        unsafe { msg_send_id![cls, new] }
+        unsafe { msg_send![cls, new] }
     }
 
     fn menu_target_class() -> &'static AnyClass {
@@ -93,12 +92,9 @@ mod imp {
         CLASS.get_or_init(|| {
             let superclass = NSObject::class();
             let mut builder =
-                ClassBuilder::new("VJDownloaderMenuTarget", superclass).expect("class");
+                ClassBuilder::new(c"VJDownloaderMenuTarget", superclass).expect("class");
             unsafe {
-                builder.add_method(
-                    sel!(openSettings:),
-                    open_settings as extern "C" fn(_, _, _),
-                );
+                builder.add_method(sel!(openSettings:), open_settings as extern "C" fn(_, _, _));
             }
             builder.register()
         })

@@ -9,11 +9,18 @@ eframe = "0.33.3"
 arboard = "3.6.1"
 url = "2.5.8"
 drag = "2.1.0"
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+walkdir = "2.5.0"
+notify = "8.2.0"
+unicode-normalization = "0.1.24"
+
+[dev-dependencies]
+tempfile = "3.14.0"
 
 [profile.dev]
 debug-assertions = false
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.5.2"
-objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSArray", "NSString", "NSObject", "NSThread", "NSURL"] }
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSApplication", "NSMenu", "NSMenuItem", "NSEvent", "NSOpenPanel", "NSPanel", "NSSavePanel", "NSWindow", "NSResponder"] }
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSString", "NSObject", "NSThread", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSMenu", "NSMenuItem", "NSEvent", "NSOpenPanel", "NSPanel", "NSSavePanel", "NSWindow", "NSResponder"] }

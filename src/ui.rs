@@ -18,9 +18,20 @@ pub fn render(
         .fill(panel_bg)
         .inner_margin(egui::Margin::symmetric(16, 16));
 
-    egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-        render_download_section(ui, ctx, app, frame);
-    });
+    egui::SidePanel::left("download_section")
+        .resizable(true)
+        .default_width(360.0)
+        .min_width(280.0)
+        .frame(panel_frame.clone())
+        .show(ctx, |ui| {
+            render_download_section(ui, ctx, app, frame);
+        });
+
+    egui::CentralPanel::default()
+        .frame(panel_frame)
+        .show(ctx, |ui| {
+            render_search_section(ui, ctx, app, frame);
+        });
 
     settings_ui::render_windows(app, ctx);
 }
@@ -60,10 +71,7 @@ fn render_download_section(
             .fill(fill)
             .corner_radius(egui::CornerRadius::same(18));
 
-            if ui
-                .add_sized([ui.available_width(), 48.0], button)
-                .clicked()
-            {
+            if ui.add_sized([ui.available_width(), 48.0], button).clicked() {
                 if app.download_in_progress {
                     app.request_cancel_download();
                 } else {
@@ -104,6 +112,183 @@ fn render_download_section(
         });
 }
 
+fn render_search_section(
+    // 検索画面の描画先UI
+    ui: &mut egui::Ui,
+    // 入力状態や再描画を扱うコンテキスト
+    ctx: &egui::Context,
+    // 検索入力の状態を保持するアプリ状態
+    app: &mut DownloaderApp,
+    // ネイティブドラッグなどフレーム操作に利用
+    frame: &eframe::Frame,
+) {
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new("Search")
+            .size(13.0)
+            .color(egui::Color32::from_rgb(226, 232, 240)),
+    );
+    ui.add_space(8.0);
+
+    let changed = render_search_input(ui, app);
+    if changed {
+        app.mark_search_dirty();
+    }
+    ui.add_space(8.0);
+
+    ui.label(
+        egui::RichText::new("設定で検索対象フォルダ（外付けSSD等）を指定してください。")
+            .size(11.5)
+            .color(egui::Color32::from_rgb(130, 140, 160)),
+    );
+    ui.add_space(8.0);
+
+    let list_height = ui.available_height();
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgb(24, 30, 45))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 44, 62)))
+        .corner_radius(egui::CornerRadius::same(14))
+        .inner_margin(egui::Margin::symmetric(3, 3))
+        .show(ui, |ui| {
+            ui.set_min_height(list_height);
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(10, 10))
+                .show(ui, |ui| {
+                    render_search_results_list(ui, ctx, app, frame, list_height);
+                });
+        });
+}
+
+fn render_search_input(
+    // 検索入力欄の描画先UI
+    ui: &mut egui::Ui,
+    // 検索クエリ文字列を保持するアプリ状態
+    app: &mut DownloaderApp,
+) -> bool {
+    let mut changed = false;
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 15))
+        .stroke(egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 36),
+        ))
+        .corner_radius(egui::CornerRadius::same(14))
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            let response = ui.add_sized(
+                [ui.available_width(), 24.0],
+                egui::TextEdit::singleline(&mut app.search_query)
+                    .hint_text("ファイル名またはメタ情報で検索...")
+                    .text_color(egui::Color32::from_rgb(226, 232, 240))
+                    .frame(false),
+            );
+            if response.changed() {
+                changed = true;
+            }
+        });
+    changed
+}
+
+fn render_search_results_list(
+    // 検索結果リストの描画先UI
+    ui: &mut egui::Ui,
+    // カーソル位置など入力情報の取得に使用
+    ctx: &egui::Context,
+    // 検索入力文字列の参照元
+    app: &mut DownloaderApp,
+    // ドラッグ開始時にOSへ通知するためのフレーム
+    frame: &eframe::Frame,
+    // 一覧の最大表示高さ
+    list_height: f32,
+) {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .max_height(list_height)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if app.search_query.trim().is_empty() {
+                return;
+            }
+
+            if let Some(err) = &app.search_error {
+                ui.label(
+                    egui::RichText::new(err)
+                        .size(12.5)
+                        .color(egui::Color32::from_rgb(248, 113, 113)),
+                );
+                return;
+            }
+
+            if app.search_results.is_empty() {
+                ui.label(
+                    egui::RichText::new("該当するファイルはありませんでした")
+                        .size(12.5)
+                        .color(egui::Color32::from_rgb(120, 130, 150)),
+                );
+                return;
+            }
+
+            let entries = app
+                .search_results
+                .iter()
+                .map(|hit| (hit.file_name.clone(), hit.path.clone()))
+                .collect::<Vec<_>>();
+            let previous_spacing = ui.spacing().item_spacing;
+            ui.spacing_mut().item_spacing = egui::vec2(previous_spacing.x, 0.0);
+            let font_id = egui::FontId::proportional(13.5);
+            let text_center_offset = measure_text_center_offset(ui, &font_id);
+
+            for (file_name, path_string) in &entries {
+                let row_width = (ui.available_width() - ui.spacing().scroll.bar_width).max(0.0);
+                let row_height = 36.0;
+                let row_padding_x = 12.0;
+                let text_max_width = (row_width - row_padding_x * 2.0).max(0.0);
+                let text = truncate_with_ellipsis(ui, file_name, text_max_width, &font_id);
+                let path = std::path::PathBuf::from(path_string);
+
+                let (row_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::hover());
+                let row_rect = row_rect.round_to_pixels(ctx.pixels_per_point());
+                let base_fill = egui::Color32::from_rgb(24, 30, 45);
+                let hover_fill = egui::Color32::from_rgb(24, 48, 70);
+                let row_hovered = ctx.input(|i| {
+                    i.pointer
+                        .latest_pos()
+                        .is_some_and(|pos| row_rect.contains(pos))
+                });
+                let fill = if row_hovered { hover_fill } else { base_fill };
+                ui.painter()
+                    .rect_filled(row_rect, egui::CornerRadius::same(0), fill);
+
+                if row_hovered {
+                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+
+                let inner_rect = row_rect.shrink2(egui::vec2(row_padding_x, 0.0));
+                let text_color = egui::Color32::from_rgb(220, 230, 245);
+                let text_pos =
+                    egui::pos2(inner_rect.left(), row_rect.center().y + text_center_offset);
+                ui.painter().text(
+                    text_pos,
+                    egui::Align2::LEFT_CENTER,
+                    text,
+                    font_id.clone(),
+                    text_color,
+                );
+
+                let drag_response = ui.interact(
+                    row_rect,
+                    ui.make_persistent_id((path_string, "search_drag_row")),
+                    egui::Sense::drag(),
+                );
+                if drag_response.drag_started() {
+                    app.start_native_drag(frame, &path);
+                }
+            }
+            ui.spacing_mut().item_spacing = previous_spacing;
+        });
+}
+
 fn render_download_list(
     // ダウンロード一覧の描画先UI
     ui: &mut egui::Ui,
@@ -132,37 +317,24 @@ fn render_download_list(
             let previous_spacing = ui.spacing().item_spacing;
             ui.spacing_mut().item_spacing = egui::vec2(previous_spacing.x, 0.0);
             let font_id = egui::FontId::proportional(13.5);
-            let text_center_offset = ui.fonts_mut(|fonts| {
-                let galley = fonts.layout_no_wrap(
-                    "Ag".to_string(),
-                    font_id.clone(),
-                    egui::Color32::WHITE,
-                );
-                galley.rect.center().y - galley.mesh_bounds.center().y
-            });
+            let text_center_offset = measure_text_center_offset(ui, &font_id);
             for path in &files {
                 let filename = path
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown");
-                let row_width =
-                    (ui.available_width() - ui.spacing().scroll.bar_width).max(0.0);
+                let row_width = (ui.available_width() - ui.spacing().scroll.bar_width).max(0.0);
                 let row_height = 36.0;
                 let row_padding_x = 12.0;
                 let remove_width = 28.0;
                 let remove_height = 28.0;
                 let remove_spacing = 8.0;
-                let text_max_width = (row_width
-                    - row_padding_x * 2.0
-                    - remove_width
-                    - remove_spacing)
-                    .max(0.0);
+                let text_max_width =
+                    (row_width - row_padding_x * 2.0 - remove_width - remove_spacing).max(0.0);
                 let text = truncate_with_ellipsis(ui, filename, text_max_width, &font_id);
 
-                let (row_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(row_width, row_height),
-                    egui::Sense::hover(),
-                );
+                let (row_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::hover());
                 let row_rect = row_rect.round_to_pixels(ctx.pixels_per_point());
                 let base_fill = egui::Color32::from_rgb(24, 30, 45);
                 let hover_fill = egui::Color32::from_rgb(24, 48, 70);
@@ -172,7 +344,8 @@ fn render_download_list(
                         .map_or(false, |pos| row_rect.contains(pos))
                 });
                 let fill = if row_hovered { hover_fill } else { base_fill };
-                ui.painter().rect_filled(row_rect, egui::CornerRadius::same(0), fill);
+                ui.painter()
+                    .rect_filled(row_rect, egui::CornerRadius::same(0), fill);
 
                 if row_hovered {
                     ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -180,10 +353,8 @@ fn render_download_list(
 
                 let inner_rect = row_rect.shrink2(egui::vec2(row_padding_x, 0.0));
                 let text_color = egui::Color32::from_rgb(220, 230, 245);
-                let text_pos = egui::pos2(
-                    inner_rect.left(),
-                    row_rect.center().y + text_center_offset,
-                );
+                let text_pos =
+                    egui::pos2(inner_rect.left(), row_rect.center().y + text_center_offset);
                 ui.painter().text(
                     text_pos,
                     egui::Align2::LEFT_CENTER,
@@ -215,10 +386,7 @@ fn render_download_list(
                 let drag_rect = {
                     let max_x = remove_button.rect.left().min(row_rect.right());
                     if max_x > row_rect.left() {
-                        egui::Rect::from_min_max(
-                            row_rect.min,
-                            egui::pos2(max_x, row_rect.bottom()),
-                        )
+                        egui::Rect::from_min_max(row_rect.min, egui::pos2(max_x, row_rect.bottom()))
                     } else {
                         row_rect
                     }
@@ -242,7 +410,6 @@ fn render_download_list(
         });
 }
 
-
 fn render_progress_panel(
     // 進捗パネルの描画先UI
     ui: &mut egui::Ui,
@@ -262,8 +429,7 @@ fn render_progress_panel(
         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20),
         opacity,
     );
-    let label_color =
-        apply_opacity(egui::Color32::from_rgb(203, 213, 225), opacity);
+    let label_color = apply_opacity(egui::Color32::from_rgb(203, 213, 225), opacity);
 
     egui::Frame::NONE
         .fill(panel_fill)
@@ -291,10 +457,8 @@ fn render_progress_panel(
 
             let bar_height = 12.0;
             let bar_width = ui.available_width();
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(bar_width, bar_height),
-                egui::Sense::hover(),
-            );
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
 
             let track_color = apply_opacity(
                 egui::Color32::from_rgba_unmultiplied(255, 255, 255, 31),
@@ -429,6 +593,18 @@ fn truncate_with_ellipsis(
     let mut out: String = chars[..low].iter().collect();
     out.push_str(ellipsis);
     out
+}
+
+fn measure_text_center_offset(
+    // フォント計測に使うUI
+    ui: &mut egui::Ui,
+    // 計測に使うフォント指定
+    font_id: &egui::FontId,
+) -> f32 {
+    ui.fonts_mut(|fonts| {
+        let galley = fonts.layout_no_wrap("Ag".to_string(), font_id.clone(), egui::Color32::WHITE);
+        galley.rect.center().y - galley.mesh_bounds.center().y
+    })
 }
 
 fn text_width(
