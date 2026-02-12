@@ -1,16 +1,15 @@
 use crate::bundled::ensure_bundled_tools;
 use crate::download::{
-    CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressUpdate, ensure_deno, ensure_yt_dlp,
-    read_clipboard_text, run_download,
+    ensure_deno, ensure_yt_dlp, read_clipboard_text, run_download, DownloadEvent, ProcessTracker,
+    ProgressUpdate, CANCELLED_ERROR,
 };
 use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
-use crate::log_ui;
-use crate::mac_input_source::{InputMode, current_mode};
+use crate::mac_input_source::{current_mode, InputMode};
 use crate::mac_menu;
 use crate::mac_window;
 use crate::paths::{search_index_db_path, yt_dlp_path};
 use crate::search_index::{SearchEngine, SearchHit, SearchRequest, SearchSort};
-use crate::settings::{SettingsData, load_cookie_args, save_settings};
+use crate::settings::{load_cookie_args, save_settings, SettingsData};
 use crate::settings_ui;
 use crate::theme::apply_theme;
 use crate::ui;
@@ -19,7 +18,7 @@ use drag::{DragItem, Image, Options};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,7 +29,7 @@ pub fn run() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([window_width, window_height])
-            .with_min_inner_size([640.0, 320.0])
+            .with_min_inner_size([320.0, 320.0])
             .with_always_on_top(),
         ..Default::default()
     };
@@ -83,6 +82,8 @@ pub struct DownloaderApp {
     applied_search_seq: u64,
     search_dirty: bool,
     last_input_mode: Option<InputMode>,
+    last_focus_state: Option<bool>,
+    cursor_resync_until: Option<Instant>,
 }
 
 impl DownloaderApp {
@@ -128,7 +129,7 @@ impl DownloaderApp {
             last_scan: Instant::now() - Duration::from_secs(5),
             refresh_needed: true,
             settings_ui: settings_ui::SettingsUiState::new(),
-            log_ui: log_ui::LogUiState::new(),
+            log_ui: LogUiState::new(),
             status_logs: AppLogger::new(),
             pending_window_resize: None,
             did_snap: false,
@@ -144,6 +145,8 @@ impl DownloaderApp {
             applied_search_seq: 0,
             search_dirty: true,
             last_input_mode: None,
+            last_focus_state: None,
+            cursor_resync_until: None,
         };
 
         mac_menu::install_settings_menu();
@@ -250,10 +253,10 @@ impl DownloaderApp {
             }
         };
 
-        let icon_path = match drag_preview_icon_path() {
+        let icon_path = match drag_fallback_preview_icon_path() {
             Some(path) => path,
             None => {
-                self.push_status("ドラッグ用アイコンが見つかりません。".to_string());
+                self.push_status("ドラッグ用フォールバックアイコンが見つかりません。".to_string());
                 return;
             }
         };
@@ -453,11 +456,50 @@ impl DownloaderApp {
             }
         }
     }
+
+    fn maintain_cursor_tracking(&mut self, ctx: &egui::Context) {
+        const CURSOR_RESYNC_WINDOW: Duration = Duration::from_millis(900);
+        const CURSOR_SYNC_TICK: Duration = Duration::from_millis(16);
+
+        let focused = ctx.input(|i| i.focused);
+        let now = Instant::now();
+        let mut force_reset = false;
+
+        match self.last_focus_state {
+            Some(prev) if prev != focused => {
+                force_reset = true;
+                if focused {
+                    self.cursor_resync_until = Some(now + CURSOR_RESYNC_WINDOW);
+                }
+            }
+            None => {
+                force_reset = true;
+                if focused {
+                    self.cursor_resync_until = Some(now + CURSOR_RESYNC_WINDOW);
+                }
+            }
+            _ => {}
+        }
+        self.last_focus_state = Some(focused);
+
+        if self
+            .cursor_resync_until
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.cursor_resync_until = None;
+        }
+
+        let should_poll = self.cursor_resync_until.is_some();
+        mac_window::enable_mouse_move_events_for_all_windows(force_reset || should_poll);
+        if should_poll {
+            ctx.request_repaint_after(CURSOR_SYNC_TICK);
+        }
+    }
 }
 
 impl eframe::App for DownloaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        mac_window::enable_mouse_move_events_for_all_windows();
+        self.maintain_cursor_tracking(ctx);
         if mac_menu::take_open_settings_request() {
             self.settings_ui.open_settings();
         }
@@ -492,7 +534,7 @@ impl eframe::App for DownloaderApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(size) = self.current_window_size {
             let mut data = SettingsData::load();
-            data.window_width = format_dimension(size.x.max(640.0));
+            data.window_width = format_dimension(size.x.max(320.0));
             data.window_height = format_dimension(size.y.max(320.0));
             let _ = save_settings(&data);
         }
@@ -530,7 +572,7 @@ fn format_dimension(value: f32) -> String {
     }
 }
 
-fn drag_preview_icon_path() -> Option<PathBuf> {
+fn drag_fallback_preview_icon_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let path = PathBuf::from(

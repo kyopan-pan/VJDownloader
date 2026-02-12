@@ -167,7 +167,7 @@ fn parse_bool(raw: &str, fallback: bool) -> bool {
 
 const DEFAULT_WINDOW_WIDTH: f32 = 860.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 1000.0;
-const MIN_WINDOW_WIDTH: f32 = 640.0;
+const MIN_WINDOW_WIDTH: f32 = 320.0;
 const MIN_WINDOW_HEIGHT: f32 = 320.0;
 
 fn parse_dimension(raw: Option<&String>, fallback: f32, min: f32) -> f32 {

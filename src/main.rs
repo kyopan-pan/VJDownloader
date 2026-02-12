@@ -1,6 +1,7 @@
 mod app;
 mod app_logger;
 mod bundled;
+mod cursor;
 mod download;
 mod fs_utils;
 mod log_ui;

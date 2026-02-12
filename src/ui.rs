@@ -2,6 +2,7 @@ use eframe::egui;
 use eframe::emath::GuiRounding;
 
 use crate::app::DownloaderApp;
+use crate::cursor::pointing;
 use crate::log_ui;
 use crate::settings_ui;
 
@@ -73,7 +74,7 @@ fn render_download_section(
             .fill(fill)
             .corner_radius(egui::CornerRadius::same(18));
 
-            if ui.add_sized([ui.available_width(), 48.0], button).clicked() {
+            if pointing(ui.add_sized([ui.available_width(), 48.0], button)).clicked() {
                 if app.download_in_progress {
                     app.request_cancel_download();
                 } else {
@@ -379,10 +380,6 @@ fn render_file_row(
     ui.painter()
         .rect_filled(row_rect, egui::CornerRadius::same(0), fill);
 
-    if row_hovered {
-        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-
     let inner_rect = row_rect.shrink2(egui::vec2(row_padding_x, 0.0));
     let text_color = egui::Color32::from_rgb(220, 230, 245);
     // テキストの垂直位置を微調整（視覚的な中央揃えのため少し上にずらす）
@@ -416,7 +413,7 @@ fn render_file_row(
         } else {
             egui::Color32::from_rgb(200, 210, 230)
         };
-        let remove_response = ui.interact(remove_rect, remove_id, egui::Sense::click());
+        let remove_response = pointing(ui.interact(remove_rect, remove_id, egui::Sense::click()));
         ui.painter().text(
             remove_rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -433,7 +430,7 @@ fn render_file_row(
         }
     }
 
-    let drag_response = ui.interact(drag_rect, drag_id, egui::Sense::drag());
+    let drag_response = pointing(ui.interact(drag_rect, drag_id, egui::Sense::drag()));
     if drag_response.drag_started() {
         app.start_native_drag(frame, drag_path);
     }

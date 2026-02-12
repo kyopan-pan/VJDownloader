@@ -3,7 +3,7 @@ mod imp {
     use objc2_app_kit::NSApplication;
     use objc2_foundation::MainThreadMarker;
 
-    pub fn enable_mouse_move_events_for_all_windows() {
+    pub fn enable_mouse_move_events_for_all_windows(force: bool) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -11,7 +11,7 @@ mod imp {
         let app = NSApplication::sharedApplication(mtm);
         let windows = app.windows();
         for window in windows.to_vec() {
-            if !window.acceptsMouseMovedEvents() {
+            if force || !window.acceptsMouseMovedEvents() {
                 window.setAcceptsMouseMovedEvents(true);
             }
         }
@@ -22,4 +22,4 @@ mod imp {
 pub use imp::enable_mouse_move_events_for_all_windows;
 
 #[cfg(not(target_os = "macos"))]
-pub fn enable_mouse_move_events_for_all_windows() {}
+pub fn enable_mouse_move_events_for_all_windows(_force: bool) {}

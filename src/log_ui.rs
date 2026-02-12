@@ -4,6 +4,7 @@ use arboard::Clipboard;
 use eframe::egui;
 
 use crate::app::DownloaderApp;
+use crate::cursor::pointing;
 
 pub struct LogUiState {
     pub show_logs: bool,
@@ -164,7 +165,7 @@ fn render_log_contents(
                         1.0,
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                     ));
-                    if ui.add(clear_btn).clicked() {
+                    if pointing(ui.add(clear_btn)).clicked() {
                         clear_clicked = true;
                     }
 
@@ -178,7 +179,7 @@ fn render_log_contents(
                         1.0,
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                     ));
-                    if ui.add(copy_btn).clicked() {
+                    if pointing(ui.add(copy_btn)).clicked() {
                         copy_clicked = true;
                     }
                 });

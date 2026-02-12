@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app::DownloaderApp;
+use crate::cursor::pointing;
 use crate::download::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
 use crate::fs_utils::is_executable;
 use crate::mac_file_dialog;
@@ -408,7 +409,7 @@ fn render_initial_setup_contents(
                             .color(egui::Color32::from_rgb(180, 200, 220)),
                     )
                     .fill(egui::Color32::from_rgb(26, 34, 52));
-                    if ui.add(open_btn).clicked() {
+                    if pointing(ui.add(open_btn)).clicked() {
                         app.settings_ui.open_settings();
                     }
                 });
@@ -497,7 +498,7 @@ fn render_settings_contents(
                                     .color(egui::Color32::from_rgb(8, 14, 24)),
                             )
                             .fill(egui::Color32::from_rgb(16, 190, 255));
-                            if ui.add(save_btn).clicked() {
+                            if pointing(ui.add(save_btn)).clicked() {
                                 if let Err(err) = apply_settings_changes(
                                     &mut app.settings_ui,
                                     &mut app.download_dir,
@@ -528,7 +529,7 @@ fn render_settings_contents(
                                     .color(egui::Color32::from_rgb(180, 190, 210)),
                             )
                             .fill(egui::Color32::from_rgb(24, 30, 45));
-                            if ui.add(cancel_btn).clicked() {
+                            if pointing(ui.add(cancel_btn)).clicked() {
                                 *should_close = true;
                                 app.settings_ui.form.error = None;
                             }
@@ -572,7 +573,7 @@ fn render_window_section(
                             .size(12.0)
                             .color(egui::Color32::from_rgb(150, 160, 180)),
                     );
-                    add_text_input(ui, &mut state.form.data.window_width, 120.0, "例: 300");
+                    add_text_input(ui, &mut state.form.data.window_width, 120.0, "例: 320");
                     ui.end_row();
 
                     ui.label(
@@ -605,7 +606,7 @@ fn render_window_section(
                                 .color(egui::Color32::from_rgb(180, 200, 220)),
                         )
                         .fill(egui::Color32::from_rgb(26, 34, 52));
-                        if ui.add(pick_btn).clicked() {
+                        if pointing(ui.add(pick_btn)).clicked() {
                             let current = state.form.data.download_dir.trim();
                             let current_path = if current.is_empty() {
                                 None
@@ -652,10 +653,10 @@ fn render_cookie_section(
                 .color(egui::Color32::from_rgb(140, 150, 170)),
             );
             ui.add_space(6.0);
-            ui.checkbox(
+            let _ = pointing(ui.checkbox(
                 &mut state.form.data.cookies_enabled,
                 "ブラウザのクッキーを使う（bot確認対策）",
-            );
+            ));
             ui.add_space(6.0);
 
             egui::Grid::new("cookies-grid")
@@ -715,7 +716,7 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
                             .color(egui::Color32::from_rgb(8, 14, 24)),
                     )
                     .fill(egui::Color32::from_rgb(16, 190, 255));
-                    if ui.add(btn).clicked() {
+                    if pointing(ui.add(btn)).clicked() {
                         should_reindex = true;
                     }
                 });
@@ -733,7 +734,7 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
                     .color(egui::Color32::from_rgb(180, 200, 220)),
             )
             .fill(egui::Color32::from_rgb(26, 34, 52));
-            if ui.add(btn).clicked() {
+            if pointing(ui.add(btn)).clicked() {
                 let current = state.form.data.search_roots.last().map(PathBuf::from);
                 add_directory = mac_file_dialog::choose_directory(current.as_deref());
             }
@@ -760,7 +761,7 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
                                     .color(egui::Color32::from_rgb(248, 113, 113)),
                             )
                             .fill(egui::Color32::from_rgb(45, 26, 34));
-                            if ui.add(remove_btn).clicked() {
+                            if pointing(ui.add(remove_btn)).clicked() {
                                 remove_index = Some(index);
                             }
                         });
@@ -846,7 +847,7 @@ fn render_tool_card(
                             .color(egui::Color32::from_rgb(8, 14, 24)),
                     )
                     .fill(egui::Color32::from_rgb(16, 190, 255));
-                    if ui.add_enabled(!busy, btn).clicked() {
+                    if pointing(ui.add_enabled(!busy, btn)).clicked() {
                         state.start_tool_action(kind, action);
                     }
                 });
@@ -939,7 +940,7 @@ fn apply_settings_changes(
         .ok_or_else(|| "画面の幅/高さは数値で入力してください。".to_string())?;
     let height = parse_dimension_input(&data.window_height)
         .ok_or_else(|| "画面の幅/高さは数値で入力してください。".to_string())?;
-    let width = width.max(260.0);
+    let width = width.max(320.0);
     let height = height.max(320.0);
     let dir_input = data.download_dir.trim();
     let actual_dir = if dir_input.is_empty() {
