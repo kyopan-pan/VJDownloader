@@ -129,7 +129,6 @@ jobs:
           cp -R "dist/VJDownloader.app" "${DMG_SRC}/VJDownloader.app"
 
           create-dmg \
-            --overwrite \
             --format UDZO \
             --volname "VJDownloader" \
             --window-size 820 520 \
