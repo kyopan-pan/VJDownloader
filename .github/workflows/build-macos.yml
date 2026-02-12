@@ -107,15 +107,103 @@ jobs:
           </plist>
           PLIST
 
-      # .app を zip 化して配布
-      - name: Create ZIP artifact (成果物をZIP化)
+      # 署名用証明書を一時キーチェーンへ取り込み（未設定時はスキップ）
+      - name: Import signing certificate (任意)
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_P12_PASSWORD: ${{ secrets.MACOS_CERT_P12_PASSWORD }}
         run: |
-          cd dist
-          zip -r "VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.zip" VJDownloader.app
+          if [ -z "${MACOS_CERT_P12_BASE64}" ] || [ -z "${MACOS_CERT_P12_PASSWORD}" ]; then
+            echo "Signing certificate secrets are not set. Skip import."
+            exit 0
+          fi
 
-      # GitHub Actions の成果物としてアップロード
+          KEYCHAIN_PATH="${RUNNER_TEMP}/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+
+          echo "${MACOS_CERT_P12_BASE64}" | (base64 --decode 2>/dev/null || base64 -D) > "${RUNNER_TEMP}/cert.p12"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${RUNNER_TEMP}/cert.p12" -k "${KEYCHAIN_PATH}" -P "${MACOS_CERT_P12_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "${KEYCHAIN_PATH}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+      # .app を Developer ID 署名（未設定時はスキップ）
+      - name: Sign .app (任意)
+        env:
+          MACOS_CERT_IDENTITY: ${{ secrets.MACOS_CERT_IDENTITY }}
+        run: |
+          if [ -z "${MACOS_CERT_IDENTITY}" ]; then
+            echo "Signing identity is not set. Skip app signing."
+            exit 0
+          fi
+
+          codesign --force --deep --options runtime --timestamp --sign "${MACOS_CERT_IDENTITY}" "dist/VJDownloader.app"
+          codesign --verify --deep --strict --verbose=2 "dist/VJDownloader.app"
+
+      # Applications へドラッグする想定の DMG を作成
+      - name: Create DMG artifact (DMG作成)
+        run: |
+          DMG_ROOT="dist/dmg-root"
+          DMG_PATH="dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.dmg"
+
+          rm -rf "${DMG_ROOT}"
+          mkdir -p "${DMG_ROOT}"
+          cp -R "dist/VJDownloader.app" "${DMG_ROOT}/VJDownloader.app"
+          ln -s /Applications "${DMG_ROOT}/Applications"
+
+          hdiutil create -volname "VJDownloader" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${DMG_PATH}"
+
+      # DMG に署名（未設定時はスキップ）
+      - name: Sign DMG (任意)
+        env:
+          MACOS_CERT_IDENTITY: ${{ secrets.MACOS_CERT_IDENTITY }}
+        run: |
+          if [ -z "${MACOS_CERT_IDENTITY}" ]; then
+            echo "Signing identity is not set. Skip dmg signing."
+            exit 0
+          fi
+
+          codesign --force --timestamp --sign "${MACOS_CERT_IDENTITY}" "dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.dmg"
+          codesign --verify --verbose=2 "dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.dmg"
+
+      # Apple Notary で公証し、チケットを付与（未設定時はスキップ）
+      - name: Notarize and staple DMG (任意)
+        env:
+          MACOS_CERT_IDENTITY: ${{ secrets.MACOS_CERT_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "${MACOS_CERT_IDENTITY}" ] || [ -z "${APPLE_ID}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD}" ] || [ -z "${APPLE_TEAM_ID}" ]; then
+            echo "Signing/notarization secrets are not set. Skip notarization."
+            exit 0
+          fi
+
+          DMG_PATH="dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.dmg"
+
+          xcrun notarytool submit "${DMG_PATH}" --apple-id "${APPLE_ID}" --password "${APPLE_APP_SPECIFIC_PASSWORD}" --team-id "${APPLE_TEAM_ID}" --wait
+          xcrun stapler staple "${DMG_PATH}"
+          spctl -a -vv -t open "${DMG_PATH}"
+
+      # DMG を成果物としてアップロード
       - name: Upload build artifact (成果物アップロード)
         uses: actions/upload-artifact@v4
         with:
           name: VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}
+          path: dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.dmg
+
+      # 参考用に .app の ZIP も残す（未署名の場合は警告回避できない）
+      - name: Create ZIP artifact (参考用ZIP)
+        run: |
+          cd dist
+          zip -r "VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.zip" VJDownloader.app
+
+      # ZIP も成果物としてアップロード
+      - name: Upload ZIP artifact (参考用アップロード)
+        uses: actions/upload-artifact@v4
+        with:
+          name: VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}-zip
           path: dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.zip
