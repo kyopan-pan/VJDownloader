@@ -104,18 +104,18 @@ mod imp {
 
     fn find_existing_preferences(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
         let titles = ["設定...", "Preferences...", "環境設定..."];
-        for title in titles {
-            let ns_title = NSString::from_str(title);
-            let index = { menu.indexOfItemWithTitle(&ns_title) };
-            if index >= 0 {
-                return menu.itemAtIndex(index);
-            }
-        }
-        None
+        find_existing_item_by_titles(menu, &titles)
     }
 
     fn find_existing_logs(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
         let titles = ["ログ...", "Logs..."];
+        find_existing_item_by_titles(menu, &titles)
+    }
+
+    fn find_existing_item_by_titles(
+        menu: &NSMenu,
+        titles: &[&str],
+    ) -> Option<Retained<NSMenuItem>> {
         for title in titles {
             let ns_title = NSString::from_str(title);
             let index = { menu.indexOfItemWithTitle(&ns_title) };
