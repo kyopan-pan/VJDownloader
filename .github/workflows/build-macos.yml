@@ -114,14 +114,13 @@ jobs:
           codesign --force --deep --sign - "dist/VJDownloader.app"
           codesign --verify --deep --strict --verbose=2 "dist/VJDownloader.app"
 
-      - name: Set up Node.js (create-dmg準備)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       # create-dmg で Applications へドラッグするレイアウト付き DMG を作成
       - name: Create DMG artifact (create-dmg)
         run: |
+          if ! command -v create-dmg >/dev/null 2>&1; then
+            brew install create-dmg
+          fi
+
           DMG_SRC="dist/dmg-src"
           DMG_PATH="dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.dmg"
 
@@ -129,7 +128,7 @@ jobs:
           mkdir -p "${DMG_SRC}"
           cp -R "dist/VJDownloader.app" "${DMG_SRC}/VJDownloader.app"
 
-          npx --yes create-dmg \
+          create-dmg \
             --overwrite \
             --format UDZO \
             --volname "VJDownloader" \
