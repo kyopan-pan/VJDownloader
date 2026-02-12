@@ -8,14 +8,14 @@ mod writer;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use db::{apply_migrations, open_connection};
 use normalize::{escape_like_pattern, normalize_query, normalize_root_path, path_to_key};
-use query::{run_search_query, QueryPattern};
+use query::{QueryPattern, run_search_query};
 use scanner::scan_root;
 use watcher::watcher_loop;
 use writer::writer_loop;

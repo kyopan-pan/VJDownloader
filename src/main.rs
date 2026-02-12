@@ -1,7 +1,9 @@
 mod app;
+mod app_logger;
 mod bundled;
 mod download;
 mod fs_utils;
+mod log_ui;
 mod mac_file_dialog;
 mod mac_input_source;
 mod mac_menu;

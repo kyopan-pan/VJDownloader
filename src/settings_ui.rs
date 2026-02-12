@@ -239,6 +239,9 @@ pub fn render_toolbar(
     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
         app.settings_ui.open_settings();
     }
+    if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::L)) {
+        app.log_ui.open_logs();
+    }
 }
 
 pub fn render_windows(

@@ -2,6 +2,7 @@ use eframe::egui;
 use eframe::emath::GuiRounding;
 
 use crate::app::DownloaderApp;
+use crate::log_ui;
 use crate::settings_ui;
 
 pub fn render(
@@ -34,6 +35,7 @@ pub fn render(
         });
 
     settings_ui::render_windows(app, ctx);
+    log_ui::render_log_viewport(app, ctx);
 }
 
 fn render_download_section(

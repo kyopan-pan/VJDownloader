@@ -10,6 +10,7 @@ mod imp {
     use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 
     static OPEN_SETTINGS_REQUEST: AtomicBool = AtomicBool::new(false);
+    static OPEN_LOGS_REQUEST: AtomicBool = AtomicBool::new(false);
     static MENU_INSTALLED: OnceLock<()> = OnceLock::new();
     static MENU_TARGET: OnceLock<usize> = OnceLock::new();
 
@@ -21,6 +22,10 @@ mod imp {
 
     pub fn take_open_settings_request() -> bool {
         OPEN_SETTINGS_REQUEST.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn take_open_logs_request() -> bool {
+        OPEN_LOGS_REQUEST.swap(false, Ordering::Relaxed)
     }
 
     fn install_settings_menu_inner() {
@@ -47,31 +52,70 @@ mod imp {
                 existing_item.setTarget(Some(target));
                 existing_item.setAction(Some(sel!(openSettings:)));
             }
-            return;
-        }
-        let title = NSString::from_str("設定...");
-        let key_equivalent = NSString::from_str(",");
-        let item = mtm.alloc::<NSMenuItem>();
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                item,
-                &title,
-                Some(sel!(openSettings:)),
-                &key_equivalent,
-            )
-        };
-        unsafe {
-            item.setTarget(Some(target));
-        }
-        item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        } else {
+            let title = NSString::from_str("設定...");
+            let key_equivalent = NSString::from_str(",");
+            let item = mtm.alloc::<NSMenuItem>();
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    item,
+                    &title,
+                    Some(sel!(openSettings:)),
+                    &key_equivalent,
+                )
+            };
+            unsafe {
+                item.setTarget(Some(target));
+            }
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
 
-        let count = app_menu.numberOfItems();
-        let insert_index = if count > 1 { 1 } else { count };
-        app_menu.insertItem_atIndex(&item, insert_index);
+            let count = app_menu.numberOfItems();
+            let insert_index = if count > 1 { 1 } else { count };
+            app_menu.insertItem_atIndex(&item, insert_index);
+        }
+
+        if let Some(existing_logs) = find_existing_logs(&app_menu) {
+            unsafe {
+                existing_logs.setTarget(Some(target));
+                existing_logs.setAction(Some(sel!(openLogs:)));
+            }
+        } else {
+            let title = NSString::from_str("ログ...");
+            let key_equivalent = NSString::from_str("l");
+            let item = mtm.alloc::<NSMenuItem>();
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    item,
+                    &title,
+                    Some(sel!(openLogs:)),
+                    &key_equivalent,
+                )
+            };
+            unsafe {
+                item.setTarget(Some(target));
+            }
+            item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+
+            let count = app_menu.numberOfItems();
+            let insert_index = if count > 2 { 2 } else { count };
+            app_menu.insertItem_atIndex(&item, insert_index);
+        }
     }
 
     fn find_existing_preferences(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
         let titles = ["設定...", "Preferences...", "環境設定..."];
+        for title in titles {
+            let ns_title = NSString::from_str(title);
+            let index = { menu.indexOfItemWithTitle(&ns_title) };
+            if index >= 0 {
+                return menu.itemAtIndex(index);
+            }
+        }
+        None
+    }
+
+    fn find_existing_logs(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
+        let titles = ["ログ...", "Logs..."];
         for title in titles {
             let ns_title = NSString::from_str(title);
             let index = { menu.indexOfItemWithTitle(&ns_title) };
@@ -95,6 +139,7 @@ mod imp {
                 ClassBuilder::new(c"VJDownloaderMenuTarget", superclass).expect("class");
             unsafe {
                 builder.add_method(sel!(openSettings:), open_settings as extern "C" fn(_, _, _));
+                builder.add_method(sel!(openLogs:), open_logs as extern "C" fn(_, _, _));
             }
             builder.register()
         })
@@ -103,15 +148,24 @@ mod imp {
     extern "C" fn open_settings(_this: &AnyObject, _sel: Sel, _sender: *mut AnyObject) {
         OPEN_SETTINGS_REQUEST.store(true, Ordering::Relaxed);
     }
+
+    extern "C" fn open_logs(_this: &AnyObject, _sel: Sel, _sender: *mut AnyObject) {
+        OPEN_LOGS_REQUEST.store(true, Ordering::Relaxed);
+    }
 }
 
 #[cfg(target_os = "macos")]
-pub use imp::{install_settings_menu, take_open_settings_request};
+pub use imp::{install_settings_menu, take_open_logs_request, take_open_settings_request};
 
 #[cfg(not(target_os = "macos"))]
 pub fn install_settings_menu() {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn take_open_settings_request() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn take_open_logs_request() -> bool {
     false
 }

@@ -4,6 +4,7 @@ use crate::download::{
     read_clipboard_text, run_download,
 };
 use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
+use crate::log_ui;
 use crate::mac_input_source::{InputMode, current_mode};
 use crate::mac_menu;
 use crate::paths::{search_index_db_path, yt_dlp_path};
@@ -12,6 +13,7 @@ use crate::settings::{SettingsData, load_cookie_args, save_settings};
 use crate::settings_ui;
 use crate::theme::apply_theme;
 use crate::ui;
+use crate::{app_logger::AppLogger, log_ui::LogUiState};
 use drag::{DragItem, Image, Options};
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -64,6 +66,8 @@ pub struct DownloaderApp {
     pub(crate) last_scan: Instant,
     pub(crate) refresh_needed: bool,
     pub(crate) settings_ui: settings_ui::SettingsUiState,
+    pub(crate) log_ui: LogUiState,
+    pub(crate) status_logs: AppLogger,
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
     pub(crate) current_window_size: Option<egui::Vec2>,
@@ -123,6 +127,8 @@ impl DownloaderApp {
             last_scan: Instant::now() - Duration::from_secs(5),
             refresh_needed: true,
             settings_ui: settings_ui::SettingsUiState::new(),
+            log_ui: log_ui::LogUiState::new(),
+            status_logs: AppLogger::new(),
             pending_window_resize: None,
             did_snap: false,
             current_window_size: None,
@@ -161,8 +167,15 @@ impl DownloaderApp {
     }
 
     pub(crate) fn push_status(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        println!("{message}");
+        self.status_logs.push(message);
+    }
+
+    pub(crate) fn clear_logs(&mut self) {
+        self.status_logs.clear();
+    }
+
+    pub(crate) fn build_recent_log_snapshot(&self, duration: Duration) -> String {
+        self.status_logs.build_recent_snapshot(duration)
     }
 
     pub(crate) fn start_download_from_clipboard(&mut self) {
@@ -445,6 +458,9 @@ impl eframe::App for DownloaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if mac_menu::take_open_settings_request() {
             self.settings_ui.open_settings();
+        }
+        if mac_menu::take_open_logs_request() {
+            self.log_ui.open_logs();
         }
         self.current_window_size = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.size()));
         if let Some(size) = self.pending_window_resize.take() {
