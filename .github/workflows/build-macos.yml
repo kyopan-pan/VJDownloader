@@ -46,14 +46,72 @@ jobs:
       - name: Build release binary (リリースビルド)
         run: cargo build --release --locked
 
-      # 配布しやすいようにバイナリを zip 化
-      - name: Create ZIP artifact (成果物をZIP化)
+      # YtDownloader由来のSVGアイコンを macOS 用 .icns に変換
+      - name: Build app icon from YtDownloader SVG (アイコン生成)
+        run: |
+          if ! command -v rsvg-convert >/dev/null 2>&1; then
+            brew install librsvg
+          fi
+
+          mkdir -p dist/icon.iconset
+          rsvg-convert -w 1024 -h 1024 assets/icon/ytdownloader-download.svg -o dist/icon-1024.png
+
+          for size in 16 32 128 256 512; do
+            sips -z "${size}" "${size}" dist/icon-1024.png --out "dist/icon.iconset/icon_${size}x${size}.png" >/dev/null
+            sips -z "$((size * 2))" "$((size * 2))" dist/icon-1024.png --out "dist/icon.iconset/icon_${size}x${size}@2x.png" >/dev/null
+          done
+
+          iconutil -c icns dist/icon.iconset -o dist/AppIcon.icns
+
+      # Finder から直接起動できる .app バンドルを作成（Terminalを経由しない）
+      - name: Create .app bundle (macOSアプリ化)
         run: |
           mkdir -p dist
-          cp target/release/VJDownloader dist/VJDownloader
-          chmod +x dist/VJDownloader
+          APP_DIR="dist/VJDownloader.app"
+          mkdir -p "${APP_DIR}/Contents/MacOS"
+          mkdir -p "${APP_DIR}/Contents/Resources"
+          cp target/release/VJDownloader "${APP_DIR}/Contents/MacOS/VJDownloader"
+          cp dist/AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
+          chmod +x "${APP_DIR}/Contents/MacOS/VJDownloader"
+
+          cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>ja</string>
+            <key>CFBundleDisplayName</key>
+            <string>VJDownloader</string>
+            <key>CFBundleExecutable</key>
+            <string>VJDownloader</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon.icns</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.kyopan.vjdownloader</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>VJDownloader</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${{ env.APP_VERSION }}</string>
+            <key>CFBundleVersion</key>
+            <string>${{ github.run_number }}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>13.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+      # .app を zip 化して配布
+      - name: Create ZIP artifact (成果物をZIP化)
+        run: |
           cd dist
-          zip "VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.zip" VJDownloader
+          zip -r "VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.zip" VJDownloader.app
 
       # GitHub Actions の成果物としてアップロード
       - name: Upload build artifact (成果物アップロード)

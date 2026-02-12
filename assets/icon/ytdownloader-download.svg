@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Derived from YtDownloader/src/main/java/com/kyopan_pan/ytdownloader/IconFactory.java -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="1024" height="1024" role="img" aria-label="YtDownloader download icon">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="24" height="24" rx="5" fill="url(#bg)"/>
+  <path d="M12 2v10h4l-6 6-6-6h4V2h4zm-8 18v2h16v-2H4z" fill="#ffffff"/>
+</svg>
