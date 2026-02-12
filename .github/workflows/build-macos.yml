@@ -114,18 +114,32 @@ jobs:
           codesign --force --deep --sign - "dist/VJDownloader.app"
           codesign --verify --deep --strict --verbose=2 "dist/VJDownloader.app"
 
-      # Applications へドラッグする想定の DMG を作成
-      - name: Create DMG artifact (DMG作成)
+      - name: Set up Node.js (create-dmg準備)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # create-dmg で Applications へドラッグするレイアウト付き DMG を作成
+      - name: Create DMG artifact (create-dmg)
         run: |
-          DMG_ROOT="dist/dmg-root"
+          DMG_SRC="dist/dmg-src"
           DMG_PATH="dist/VJDownloader-${{ env.APP_VERSION }}-${{ matrix.os }}.dmg"
 
-          rm -rf "${DMG_ROOT}"
-          mkdir -p "${DMG_ROOT}"
-          cp -R "dist/VJDownloader.app" "${DMG_ROOT}/VJDownloader.app"
-          ln -s /Applications "${DMG_ROOT}/Applications"
+          rm -rf "${DMG_SRC}" "${DMG_PATH}"
+          mkdir -p "${DMG_SRC}"
+          cp -R "dist/VJDownloader.app" "${DMG_SRC}/VJDownloader.app"
 
-          hdiutil create -volname "VJDownloader" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${DMG_PATH}"
+          npx --yes create-dmg \
+            --overwrite \
+            --format UDZO \
+            --volname "VJDownloader" \
+            --window-size 820 520 \
+            --icon-size 160 \
+            --icon "VJDownloader.app" 220 250 \
+            --hide-extension "VJDownloader.app" \
+            --app-drop-link 600 250 \
+            "${DMG_PATH}" \
+            "${DMG_SRC}"
 
       # DMG を成果物としてアップロード
       - name: Upload build artifact (成果物アップロード)
