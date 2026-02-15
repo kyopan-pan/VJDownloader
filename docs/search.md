@@ -21,7 +21,7 @@ cargo test search_index::tests -- --test-threads=1
 ```
 
 ## 設計概要
-- DB: SQLite（`~/.ytdownloader/search_index.sqlite3`）
+- DB: SQLite（`~/.vjdownloader/search_index.sqlite3`）
 - 書き込み: 単一ライタースレッド（キュー経由）
 - 読み取り: 検索ワーカーでクエリ実行
 - 初回/再構築: `walkdir`でフルスキャン

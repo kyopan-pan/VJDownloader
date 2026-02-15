@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Derived from YtDownloader/src/main/java/com/kyopan_pan/ytdownloader/IconFactory.java -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="1024" height="1024" role="img" aria-label="YtDownloader download icon">
+<!-- Derived from VJDownloader/src/main/java/com/kyopan_pan/vjdownloader/IconFactory.java -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="1024" height="1024" role="img" aria-label="VJDownloader download icon">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#38bdf8"/>

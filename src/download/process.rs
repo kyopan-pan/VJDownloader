@@ -143,16 +143,16 @@ pub(super) fn run_yt_dlp(
         .stderr(Stdio::piped());
 
     if add_bin_to_path {
+        let mut paths = Vec::new();
         let bin = bin_dir();
         if bin.exists() {
-            let mut paths = Vec::new();
             paths.push(bin.as_os_str().to_owned());
-            if let Some(current) = std::env::var_os("PATH") {
-                paths.push(current);
-            }
-            if let Ok(joined) = std::env::join_paths(paths) {
-                command.env("PATH", joined);
-            }
+        }
+        if let Some(current) = std::env::var_os("PATH") {
+            paths.push(current);
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("PATH", joined);
         }
     }
 

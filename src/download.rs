@@ -274,9 +274,14 @@ fn run_download_inner(
     } else {
         let output_template = staging_dir.join("%(title)s.%(ext)s");
         let ffmpeg_arg = ffmpeg.to_string_lossy().to_string();
+        let js_runtime = tools::js_runtime_arg();
 
         let mut args = Vec::new();
-        args.extend(tools::base_yt_dlp_args(&ffmpeg_arg, &cookie_args));
+        args.extend(tools::base_yt_dlp_args(
+            &ffmpeg_arg,
+            &cookie_args,
+            &js_runtime,
+        ));
         args.push("-o".to_string());
         args.push(output_template.to_string_lossy().to_string());
         args.push(url.clone());
@@ -292,7 +297,11 @@ fn run_download_inner(
                     Err(CANCELLED_ERROR.to_string())
                 } else {
                     let mut fallback_args = Vec::new();
-                    fallback_args.extend(tools::fallback_yt_dlp_args(&ffmpeg_arg, &cookie_args));
+                    fallback_args.extend(tools::fallback_yt_dlp_args(
+                        &ffmpeg_arg,
+                        &cookie_args,
+                        &js_runtime,
+                    ));
                     fallback_args.push("-o".to_string());
                     fallback_args.push(output_template.to_string_lossy().to_string());
                     fallback_args.push(url);

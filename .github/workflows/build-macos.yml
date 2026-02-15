@@ -11,7 +11,7 @@ jobs:
   build:
     strategy:
       matrix:
-        # YtDownloader と同じ運用に合わせた macOS マトリクス
+        # VJDownloader と同じ運用に合わせた macOS マトリクス
         os: [ macos-14, macos-15, macos-26 ]
         include:
           - os: macos-14
@@ -46,23 +46,6 @@ jobs:
       - name: Build release binary (リリースビルド)
         run: cargo build --release --locked
 
-      # YtDownloader由来のSVGアイコンを macOS 用 .icns に変換
-      - name: Build app icon from YtDownloader SVG (アイコン生成)
-        run: |
-          if ! command -v rsvg-convert >/dev/null 2>&1; then
-            brew install librsvg
-          fi
-
-          mkdir -p dist/icon.iconset
-          rsvg-convert -w 1024 -h 1024 assets/icon/ytdownloader-download.svg -o dist/icon-1024.png
-
-          for size in 16 32 128 256 512; do
-            sips -z "${size}" "${size}" dist/icon-1024.png --out "dist/icon.iconset/icon_${size}x${size}.png" >/dev/null
-            sips -z "$((size * 2))" "$((size * 2))" dist/icon-1024.png --out "dist/icon.iconset/icon_${size}x${size}@2x.png" >/dev/null
-          done
-
-          iconutil -c icns dist/icon.iconset -o dist/AppIcon.icns
-
       # Finder から直接起動できる .app バンドルを作成（Terminalを経由しない）
       - name: Create .app bundle (macOSアプリ化)
         run: |
@@ -71,7 +54,7 @@ jobs:
           mkdir -p "${APP_DIR}/Contents/MacOS"
           mkdir -p "${APP_DIR}/Contents/Resources"
           cp target/release/VJDownloader "${APP_DIR}/Contents/MacOS/VJDownloader"
-          cp dist/AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
+          cp assets/icon/App.icns "${APP_DIR}/Contents/Resources/App.icns"
           chmod +x "${APP_DIR}/Contents/MacOS/VJDownloader"
 
           cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
@@ -86,7 +69,7 @@ jobs:
             <key>CFBundleExecutable</key>
             <string>VJDownloader</string>
             <key>CFBundleIconFile</key>
-            <string>AppIcon.icns</string>
+            <string>App.icns</string>
             <key>CFBundleIdentifier</key>
             <string>com.kyopan.vjdownloader</string>
             <key>CFBundleInfoDictionaryVersion</key>

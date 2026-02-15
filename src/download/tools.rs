@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 
-use crate::fs_utils::ensure_dir;
+use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{bin_dir, deno_path, yt_dlp_path};
 
 use super::DownloadEvent;
@@ -97,8 +97,20 @@ pub fn update_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
     update_tool_with_rollback(&deno, "deno", tx, ensure_deno)
 }
 
+// 実行可能な deno を探索し、yt-dlp に渡す runtime 指定文字列を返す。
+pub(super) fn js_runtime_arg() -> String {
+    match detect_deno_binary() {
+        Some(path) => format!("deno:{}", path.to_string_lossy()),
+        None => "deno".to_string(),
+    }
+}
+
 // yt-dlp の通常ダウンロード用引数セットを組み立てる。
-pub(super) fn base_yt_dlp_args(ffmpeg_path: &str, cookie_args: &[String]) -> Vec<String> {
+pub(super) fn base_yt_dlp_args(
+    ffmpeg_path: &str,
+    cookie_args: &[String],
+    js_runtime: &str,
+) -> Vec<String> {
     let mut args = vec!["--no-playlist".to_string()];
     args.extend(cookie_args.iter().cloned());
     args.extend(vec![
@@ -119,13 +131,17 @@ pub(super) fn base_yt_dlp_args(ffmpeg_path: &str, cookie_args: &[String]) -> Vec
     args.push("--ffmpeg-location".to_string());
     args.push(ffmpeg_path.to_string());
     args.push("--js-runtimes".to_string());
-    args.push("deno".to_string());
+    args.push(js_runtime.to_string());
 
     args
 }
 
 // H.264 優先モードが失敗した場合のフォールバック引数セットを組み立てる。
-pub(super) fn fallback_yt_dlp_args(ffmpeg_path: &str, cookie_args: &[String]) -> Vec<String> {
+pub(super) fn fallback_yt_dlp_args(
+    ffmpeg_path: &str,
+    cookie_args: &[String],
+    js_runtime: &str,
+) -> Vec<String> {
     let mut args = vec!["--no-playlist".to_string()];
     args.extend(cookie_args.iter().cloned());
     args.extend(vec![
@@ -146,9 +162,36 @@ pub(super) fn fallback_yt_dlp_args(ffmpeg_path: &str, cookie_args: &[String]) ->
     args.push("--ffmpeg-location".to_string());
     args.push(ffmpeg_path.to_string());
     args.push("--js-runtimes".to_string());
-    args.push("deno".to_string());
+    args.push(js_runtime.to_string());
 
     args
+}
+
+fn detect_deno_binary() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("DENO_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("DENO_BIN") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(deno_path());
+
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".deno").join("bin").join("deno"));
+    }
+    candidates.push(PathBuf::from("/opt/homebrew/bin/deno"));
+    candidates.push(PathBuf::from("/usr/local/bin/deno"));
+
+    if let Some(path_env) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_env) {
+            candidates.push(dir.join("deno"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists() && is_executable(candidate))
 }
 
 fn update_tool_with_rollback<F>(

@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::paths::{
-    default_download_dir, legacy_settings_file_path, make_absolute_path, settings_file_path,
-};
+use crate::paths::{default_download_dir, make_absolute_path, settings_file_path};
 
 #[derive(Clone, Debug)]
 pub struct SettingsData {
@@ -160,10 +158,7 @@ pub fn load_cookie_args() -> Vec<String> {
 
 fn load_settings_properties() -> HashMap<String, String> {
     let path = settings_file_path();
-    if let Some(props) = read_properties_from_path(&path) {
-        return props;
-    }
-    read_properties_from_path(&legacy_settings_file_path()).unwrap_or_default()
+    read_properties_from_path(&path).unwrap_or_default()
 }
 
 fn read_properties_from_path(path: &PathBuf) -> Option<HashMap<String, String>> {

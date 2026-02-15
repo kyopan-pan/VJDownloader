@@ -3,16 +3,16 @@
 ## 概要
 - クリップボードのURLから動画をダウンロードし、ローカルのMP4を管理・送出するmacOS向けツール。
 - UIはダーク基調で、ダウンロード進捗と保存済みリストを表示する。
-- アプリ名は「VJ Downloader (Rust)」で表示される。
+- アプリ名は「VJDownloader」で表示される。
+- macOSアプリバンドルのアイコンは`assets/icon/App.icns`をそのまま同梱して使用する（ビルド時のアイコン生成は行わない）。
 
 ## ウィンドウ
 - 初期サイズは幅420px・高さ720px。
 - 最小サイズは幅360px・高さ640px。
 
 ## 保存先と設定
-- 既定の保存先は`~/Movies/YtDlpDownloads`。
+- 既定の保存先は`~/Movies/VJDL`。
 - 設定ファイルは`~/.vjdownloader/settings.properties`。
-- 設定読み込み時は、`~/.vjdownloader/settings.properties`が無い場合に限り`~/.ytdownloader/settings.properties`も互換読込する。
 - 設定キー`download.dir`が存在し空でない場合、その値を保存先として使用する。
 - 設定キー`layout.download.width`/`layout.search.width`にメイン画面の左右ペイン幅を保存する。
 - 設定ファイルは`#`または`!`で始まる行をコメントとして無視する。
@@ -42,12 +42,12 @@
 - クッキー取得はyt-dlpの`--cookies-from-browser`オプションとして渡す。
 
 ## 内部パス
-- アプリ用データは`~/.ytdownloader`配下を使用する。
-- `~/.ytdownloader/bin`にツール用のバイナリを配置する。
-- yt-dlpは`~/.ytdownloader/bin/yt-dlp`に保存する。
-- ffmpegは`~/.ytdownloader/bin/ffmpeg`を参照する。
-- ffprobeは`~/.ytdownloader/bin/ffprobe`を参照する。
-- denoは`~/.ytdownloader/bin/deno`を参照する。
+- アプリ用データは`~/.vjdownloader`配下を使用する。
+- `~/.vjdownloader/bin`にツール用のバイナリを配置する。
+- yt-dlpは`~/.vjdownloader/bin/yt-dlp`に保存する。
+- ffmpegは`~/.vjdownloader/bin/ffmpeg`を参照する。
+- ffprobeは`~/.vjdownloader/bin/ffprobe`を参照する。
+- denoは`~/.vjdownloader/bin/deno`を参照する。
 
 ## ダウンロード開始
 - ダウンロード開始はクリップボードの文字列をそのままURLとして利用する。
@@ -176,7 +176,7 @@
 - ドラッグ開始失敗時はステータスにエラーを表示する。
 
 ## mp4検索インデックス（SQLite）
-- mp4検索は`~/.ytdownloader/search_index.sqlite3`のSQLiteインデックスを使用する。
+- mp4検索は`~/.vjdownloader/search_index.sqlite3`のSQLiteインデックスを使用する。
 - `roots`テーブルで検索対象ルートフォルダを管理し、`files`テーブルでmp4ファイル情報を管理する。
 - `files`には`path`（PK）、`root_id`、`file_name`、`file_name_norm`、`parent_dir`、`size_bytes`、`modified_time`、`created_time`、`last_indexed_time`を保持する。
 - `roots`には`root_id`（PK）、`root_path`、`is_enabled`、`last_scan_time`を保持する。

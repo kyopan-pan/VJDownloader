@@ -26,16 +26,21 @@ pub fn run() -> eframe::Result<()> {
     let settings = SettingsData::load();
     let window_width = settings.window_width.parse::<f32>().unwrap_or(860.0);
     let window_height = settings.window_height.parse::<f32>().unwrap_or(1000.0);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([window_width, window_height])
+        .with_min_inner_size([320.0, 320.0])
+        .with_always_on_top();
+    #[cfg(target_os = "macos")]
+    {
+        viewport = viewport.with_icon(egui::IconData::default());
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([window_width, window_height])
-            .with_min_inner_size([320.0, 320.0])
-            .with_always_on_top(),
+        viewport,
         ..Default::default()
     };
 
     eframe::run_native(
-        "YT Downloader",
+        "VJDownloader",
         options,
         Box::new(|cc| Ok(Box::new(DownloaderApp::new(cc)))),
     )
@@ -163,6 +168,7 @@ impl DownloaderApp {
         };
 
         mac_menu::install_settings_menu();
+        mac_window::apply_app_icon_from_icns();
 
         if let Err(err) = ensure_bundled_tools() {
             app.push_status(format!("同梱ツールの配置に失敗しました: {err}"));
