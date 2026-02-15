@@ -8,8 +8,6 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use url::Url;
 
-use crate::paths::ffprobe_path;
-
 use super::process::{run_pipe_to_ffmpeg_or_cancel, spawn_stream_thread, terminate_child_process};
 use super::{CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressContext, ProgressUpdate};
 
@@ -40,49 +38,49 @@ pub(super) fn run_animethemes_pipeline(
             let _ = tx.send(DownloadEvent::Log(format!(
                 "AnimeThemes直リンクを取得しました: {webm_url}"
             )));
-            let temp_webm_path = build_animethemes_temp_webm_path(&output_path);
-            download_animethemes_webm_with_progress(
+            let direct_result = stream_animethemes_webm_to_mp4_with_gpu(
                 &webm_url,
-                &temp_webm_path,
-                tx,
-                progress,
-                tracker,
-                cancel_flag,
-            )?;
-            let convert_result = convert_animethemes_webm_to_mp4_with_gpu(
                 ffmpeg,
-                &temp_webm_path,
                 &output_path,
                 tx,
                 progress,
                 tracker,
                 cancel_flag,
             );
-            let _ = fs::remove_file(&temp_webm_path);
-            convert_result?;
+            match direct_result {
+                Ok(()) => {}
+                Err(err) if err == CANCELLED_ERROR => return Err(err),
+                Err(err) => {
+                    let _ = tx.send(DownloadEvent::Log(format!(
+                        "AnimeThemes直リンク経路で失敗しました: {err}"
+                    )));
+                    let _ = tx.send(DownloadEvent::Log(
+                        "yt-dlpフォールバックへ切り替えます。".to_string(),
+                    ));
+                    run_animethemes_yt_dlp_fallback(
+                        url,
+                        yt_dlp,
+                        ffmpeg,
+                        &output_path,
+                        tx,
+                        progress,
+                        tracker,
+                        cancel_flag,
+                    )?;
+                }
+            }
         }
         None => {
             let _ = tx.send(DownloadEvent::Log(
                 "AnimeThemes直リンク取得に失敗。yt-dlpでフォールバックします。".to_string(),
             ));
-            let mut cmd = Command::new(yt_dlp);
-            cmd.arg("--no-playlist")
-                .arg("--concurrent-fragments")
-                .arg("4")
-                .arg("-f")
-                .arg("bv+ba/b")
-                .arg("--ffmpeg-location")
-                .arg(ffmpeg.to_string_lossy().to_string())
-                .arg("-o")
-                .arg("-")
-                .arg(url);
-            run_pipe_to_ffmpeg_or_cancel(
-                cmd,
+            run_animethemes_yt_dlp_fallback(
+                url,
+                yt_dlp,
                 ffmpeg,
                 &output_path,
                 tx,
                 progress,
-                "webm",
                 tracker,
                 cancel_flag,
             )?;
@@ -92,24 +90,51 @@ pub(super) fn run_animethemes_pipeline(
     Ok(())
 }
 
-// 変換前に保存する一時 WebM ファイル名を作る。
-fn build_animethemes_temp_webm_path(output_path: &Path) -> PathBuf {
-    let mut temp = output_path.to_path_buf();
-    temp.set_extension("webm.part");
-    temp
+fn run_animethemes_yt_dlp_fallback(
+    url: &str,
+    yt_dlp: &Path,
+    ffmpeg: &Path,
+    output_path: &Path,
+    tx: &mpsc::Sender<DownloadEvent>,
+    progress: &Arc<ProgressContext>,
+    tracker: &ProcessTracker,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    let mut cmd = Command::new(yt_dlp);
+    cmd.arg("--no-playlist")
+        .arg("--concurrent-fragments")
+        .arg("4")
+        .arg("-f")
+        .arg("bv+ba/b")
+        .arg("--ffmpeg-location")
+        .arg(ffmpeg.to_string_lossy().to_string())
+        .arg("-o")
+        .arg("-")
+        .arg(url);
+    run_pipe_to_ffmpeg_or_cancel(
+        cmd,
+        ffmpeg,
+        output_path,
+        tx,
+        progress,
+        "webm",
+        tracker,
+        cancel_flag,
+    )
 }
 
-// curl で WebM を取得し、進捗イベントを発行しながら一時ファイルへ保存する。
-fn download_animethemes_webm_with_progress(
+// curl 受信ストリームを ffmpeg に流し込み、ダウンロードと変換を並列で進める。
+fn stream_animethemes_webm_to_mp4_with_gpu(
     webm_url: &str,
-    temp_webm_path: &Path,
+    ffmpeg: &Path,
+    output_path: &Path,
     tx: &mpsc::Sender<DownloadEvent>,
     progress: &Arc<ProgressContext>,
     tracker: &ProcessTracker,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     let _ = tx.send(DownloadEvent::Log(
-        "動画ダウンロードを開始します。".to_string(),
+        "動画ダウンロードと変換を同時に開始します。".to_string(),
     ));
     let total_bytes = fetch_content_length(webm_url);
     if let Some(total) = total_bytes {
@@ -151,11 +176,57 @@ fn download_animethemes_webm_with_progress(
             return Err("curl出力の取得に失敗しました。".to_string());
         }
     };
-    let mut output_file = match fs::File::create(temp_webm_path) {
-        Ok(file) => file,
-        Err(err) => {
+
+    let _ = tx.send(DownloadEvent::Log(
+        "ffmpeg(GPU: h264_videotoolbox)でストリーミング変換を開始します。".to_string(),
+    ));
+
+    let mut ffmpeg_cmd = Command::new(ffmpeg);
+    ffmpeg_cmd
+        .arg("-stats")
+        .arg("-analyzeduration")
+        .arg("100M")
+        .arg("-probesize")
+        .arg("100M")
+        .arg("-f")
+        .arg("webm")
+        .arg("-i")
+        .arg("pipe:0")
+        .arg("-c:v")
+        .arg("h264_videotoolbox")
+        .arg("-b:v")
+        .arg("5M")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-c:a")
+        .arg("aac")
+        .arg("-b:a")
+        .arg("192k")
+        .arg("-ignore_unknown")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg("-f")
+        .arg("mp4")
+        .arg("-y")
+        .arg(output_path.to_string_lossy().to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut ffmpeg_child = ffmpeg_cmd
+        .spawn()
+        .map_err(|err| format!("ffmpeg起動に失敗しました: {err}"))?;
+    tracker.register(&ffmpeg_child);
+    spawn_stream_thread(ffmpeg_child.stdout.take(), tx, progress);
+    spawn_ffmpeg_conversion_thread(ffmpeg_child.stderr.take(), tx, progress, None);
+
+    let mut ffmpeg_stdin = match ffmpeg_child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
             terminate_child_process(&mut curl_child);
-            return Err(format!("一時ファイルの作成に失敗しました: {err}"));
+            terminate_child_process(&mut ffmpeg_child);
+            let _ = fs::remove_file(output_path);
+            return Err("ffmpeg入力パイプの取得に失敗しました。".to_string());
         }
     };
 
@@ -166,7 +237,8 @@ fn download_animethemes_webm_with_progress(
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
             terminate_child_process(&mut curl_child);
-            let _ = fs::remove_file(temp_webm_path);
+            terminate_child_process(&mut ffmpeg_child);
+            let _ = fs::remove_file(output_path);
             return Err(CANCELLED_ERROR.to_string());
         }
 
@@ -174,22 +246,25 @@ fn download_animethemes_webm_with_progress(
             Ok(read) => read,
             Err(err) => {
                 terminate_child_process(&mut curl_child);
-                let _ = fs::remove_file(temp_webm_path);
+                terminate_child_process(&mut ffmpeg_child);
+                let _ = fs::remove_file(output_path);
                 return Err(format!("動画ストリームの読み取りに失敗しました: {err}"));
             }
         };
         if read == 0 {
             break;
         }
-        if let Err(err) = output_file.write_all(&buf[..read]) {
+        if let Err(err) = ffmpeg_stdin.write_all(&buf[..read]) {
             terminate_child_process(&mut curl_child);
-            let _ = fs::remove_file(temp_webm_path);
-            return Err(format!("一時ファイルへの書き込みに失敗しました: {err}"));
+            terminate_child_process(&mut ffmpeg_child);
+            let _ = fs::remove_file(output_path);
+            return Err(format!("ffmpeg入力への書き込みに失敗しました: {err}"));
         }
 
         downloaded += read as u64;
         if let Some(total) = total_bytes {
             if total > 0 {
+                progress.mark_progress_started();
                 let percent = (downloaded as f64 * 100.0 / total as f64).clamp(0.0, 100.0) as f32;
                 let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::downloading(
                     percent,
@@ -212,112 +287,43 @@ fn download_animethemes_webm_with_progress(
             )));
         }
     }
-
-    if let Err(err) = output_file.flush() {
-        terminate_child_process(&mut curl_child);
-        let _ = fs::remove_file(temp_webm_path);
-        return Err(format!("一時ファイルの保存に失敗しました: {err}"));
-    }
+    drop(ffmpeg_stdin);
 
     let curl_status = curl_child
         .wait()
         .map_err(|err| format!("curlの終了待ちに失敗しました: {err}"))?;
 
     if cancel_flag.load(Ordering::Relaxed) {
-        let _ = fs::remove_file(temp_webm_path);
+        terminate_child_process(&mut ffmpeg_child);
+        let _ = fs::remove_file(output_path);
         return Err(CANCELLED_ERROR.to_string());
     }
     if !curl_status.success() {
-        let _ = fs::remove_file(temp_webm_path);
+        terminate_child_process(&mut ffmpeg_child);
+        let _ = fs::remove_file(output_path);
         return Err(format!("curlが異常終了しました: {curl_status}"));
     }
 
+    progress.mark_progress_started();
     let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::downloading(
         100.0,
         &progress.elapsed(),
     )));
     let _ = tx.send(DownloadEvent::Log("ダウンロード進捗: 100.0%".to_string()));
-    let _ = tx.send(DownloadEvent::Log(
-        "動画ダウンロードが完了しました。".to_string(),
-    ));
-    Ok(())
-}
-
-// WebM を Apple Silicon GPU エンコーダで MP4 へ変換し、進捗を UI へ送る。
-fn convert_animethemes_webm_to_mp4_with_gpu(
-    ffmpeg: &Path,
-    input_webm_path: &Path,
-    output_path: &Path,
-    tx: &mpsc::Sender<DownloadEvent>,
-    progress: &Arc<ProgressContext>,
-    tracker: &ProcessTracker,
-    cancel_flag: &Arc<AtomicBool>,
-) -> Result<(), String> {
-    if cancel_flag.load(Ordering::Relaxed) {
-        return Err(CANCELLED_ERROR.to_string());
-    }
     progress.set_post_processing();
     let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::post_processing(
         &progress.elapsed(),
     )));
-    let _ = tx.send(DownloadEvent::Log(
-        "ffmpeg(GPU: h264_videotoolbox)で変換を開始します。".to_string(),
-    ));
-    let conversion_total_seconds = probe_media_duration_seconds(input_webm_path);
-    if conversion_total_seconds.is_none() {
-        let _ = tx.send(DownloadEvent::Log(
-            "ffprobeで長さ取得に失敗したため、変換進捗バーは概算表示になります。".to_string(),
-        ));
-    }
-
-    let mut ffmpeg_cmd = Command::new(ffmpeg);
-    ffmpeg_cmd
-        .arg("-stats")
-        .arg("-analyzeduration")
-        .arg("100M")
-        .arg("-probesize")
-        .arg("100M")
-        .arg("-i")
-        .arg(input_webm_path.to_string_lossy().to_string())
-        .arg("-c:v")
-        .arg("h264_videotoolbox")
-        .arg("-b:v")
-        .arg("5M")
-        .arg("-pix_fmt")
-        .arg("yuv420p")
-        .arg("-c:a")
-        .arg("aac")
-        .arg("-b:a")
-        .arg("192k")
-        .arg("-ignore_unknown")
-        .arg("-movflags")
-        .arg("+faststart")
-        .arg("-f")
-        .arg("mp4")
-        .arg("-y")
-        .arg(output_path.to_string_lossy().to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut ffmpeg_child = ffmpeg_cmd
-        .spawn()
-        .map_err(|err| format!("ffmpeg起動に失敗しました: {err}"))?;
-    tracker.register(&ffmpeg_child);
-    spawn_stream_thread(ffmpeg_child.stdout.take(), tx, progress);
-    spawn_ffmpeg_conversion_thread(
-        ffmpeg_child.stderr.take(),
-        tx,
-        progress,
-        conversion_total_seconds,
-    );
 
     let ffmpeg_status = ffmpeg_child
         .wait()
         .map_err(|err| format!("ffmpegの終了待ちに失敗しました: {err}"))?;
     if cancel_flag.load(Ordering::Relaxed) {
+        let _ = fs::remove_file(output_path);
         return Err(CANCELLED_ERROR.to_string());
     }
     if !ffmpeg_status.success() {
+        let _ = fs::remove_file(output_path);
         return Err(format!("ffmpegが異常終了しました: {ffmpeg_status}"));
     }
     let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::converting(
@@ -326,34 +332,6 @@ fn convert_animethemes_webm_to_mp4_with_gpu(
     )));
     let _ = tx.send(DownloadEvent::Log("ffmpeg変換が完了しました。".to_string()));
     Ok(())
-}
-
-// ffprobe でメディア長を秒単位で取得する。
-fn probe_media_duration_seconds(path: &Path) -> Option<f64> {
-    let ffprobe = ffprobe_path();
-    if !ffprobe.exists() {
-        return None;
-    }
-    let output = Command::new(ffprobe)
-        .arg("-v")
-        .arg("error")
-        .arg("-show_entries")
-        .arg("format=duration")
-        .arg("-of")
-        .arg("default=noprint_wrappers=1:nokey=1")
-        .arg(path.to_string_lossy().to_string())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let duration = text.trim().parse::<f64>().ok()?;
-    if duration.is_finite() && duration > 0.0 {
-        Some(duration)
-    } else {
-        None
-    }
 }
 
 // ffmpeg の stderr を解析して変換進捗を推定するスレッドを起動する。

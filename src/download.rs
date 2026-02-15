@@ -21,7 +21,7 @@ pub use tools::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
 pub enum DownloadEvent {
     Log(String),
     Progress(ProgressUpdate),
-    Done(Result<(), String>),
+    Done(Result<(), String>, String),
 }
 
 pub(crate) const CANCELLED_ERROR: &str = "__CANCELLED__";
@@ -219,8 +219,9 @@ pub fn run_download(
         &tracker,
     );
 
+    let total_elapsed = progress.elapsed();
     finalize_progress(&progress, &tx, result.is_ok());
-    let _ = tx.send(DownloadEvent::Done(result));
+    let _ = tx.send(DownloadEvent::Done(result, total_elapsed));
 }
 
 // URL 判定と実体処理の振り分け、作業フォルダ後始末を行うメインフロー。

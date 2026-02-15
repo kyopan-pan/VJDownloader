@@ -92,17 +92,17 @@
 - URLに`animethemes.moe`を含む場合に専用パイプラインへ分岐する。
 - ファイル名はURLパスを基にした`.mp4`（タイムスタンプ付き）を使用する。
 - URL解析・API/HTML確認中は進捗メッセージに`動画情報確認中・・・`を表示する。
-- パイプラインは`リンク取得 -> 直リンク(webm)ダウンロード -> ffmpeg変換(mp4)`の順で実行する。
+- パイプラインは`リンク取得 -> 直リンク(webm)受信とffmpeg変換(mp4)の並列実行`を基本とする。
 - 直リンク取得（優先）: `AnimeThemes API`（`/anime/<slug>?include=animethemes.animethemeentries.videos`）を優先し、必要に応じて`/anime?filter[slug]=<slug>&include=...`も試行する。
 - APIレスポンスはJSON:API形式（`included` + `relationships`）と従来のネスト形式の両方に対応し、`theme.slug/type+sequence -> animethemeentries -> videos -> link`を辿って`.webm`を抽出する。
 - APIで取得できない場合はHTML解析へフォールバックし、`curl -sL -m 8 -A <UA> --range 0-262143`で先頭を取得して`og:video`または`video src`から`https://.../*.webm`を抽出する。見つからない場合は全文取得で再試行する。
-- 直リンクを取得できた場合は一時`.webm`へ保存し、`Content-Length`と転送量からダウンロード進捗（`n%`）を算出して表示する。
+- 直リンクを取得できた場合は`curl`の受信バイト列を`ffmpeg`の`stdin`へ逐次転送し、ダウンロードと変換を同時進行させる。
+- 直リンク経路のダウンロード進捗は`Content-Length`と転送量から算出し、受信中に`n%`を表示する。
 - ダウンロード進捗は進捗バーだけでなくログにも`ダウンロード進捗: n%`として出力する。
 - ffmpeg変換は`h264_videotoolbox`を必須とし、利用できない場合は処理を中断する。
-- ffmpeg変換時は`ffprobe`で入力動画の長さを取得し、`ffmpeg`ログの`time=`進捗から変換進捗（`変換中... n%`）を進捗バーへ反映する。
 - ffmpeg変換ログは整形せずデフォルト出力をそのままステータスログへ出力する。
-- 直リンク取得に失敗した場合は`yt-dlp --no-playlist --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`の出力をffmpegへパイプする。
-- ffmpegは`-stats -analyzeduration 100M -probesize 100M -c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`を基本とし、直リンク経路では`-i <一時webm>`、yt-dlpフォールバック経路では`-f webm -i pipe:0`を使用する。
+- 直リンク取得に失敗した場合、または直リンク経路の`curl`/`ffmpeg`処理が失敗した場合は`yt-dlp --no-playlist --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`の出力をffmpegへパイプする。
+- ffmpegは`-stats -analyzeduration 100M -probesize 100M -c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`を基本とし、直リンク経路・yt-dlpフォールバック経路ともに`-f webm -i pipe:0`を使用する。
 
 ## 進捗表示
 - 進捗パネルは常に表示され、待機中は半透明表示となる。
@@ -151,6 +151,7 @@
 - ログ画面には`アプリを終了するとログはクリアされます。`の案内を表示する。
 - `表示をクリア`ボタンでログ一覧を全削除する。
 - `直近10分をコピー`ボタンで直近10分のログをクリップボードへコピーする。
+- ダウンロード成功時は`Download completed. Total time: <mm:ss or h:mm:ss>`をログ出力する。
 - ログはアプリ終了時にクリアされる（永続化しない）。
 - macOSでは入力ソース変更を監視し、日本語入力に切り替わった場合は`日本語になりました`、英字入力（ABC）に切り替わった場合は`英字になりました`をログ出力する。
 

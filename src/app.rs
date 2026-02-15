@@ -330,13 +330,13 @@ impl DownloaderApp {
             match event {
                 DownloadEvent::Log(line) => self.push_status(line),
                 DownloadEvent::Progress(update) => self.handle_progress_update(update),
-                DownloadEvent::Done(result) => done = Some(result),
+                DownloadEvent::Done(result, elapsed) => done = Some((result, elapsed)),
             }
         }
 
-        if let Some(result) = done {
+        if let Some((result, elapsed)) = done {
             match result {
-                Ok(()) => self.push_status("Download completed."),
+                Ok(()) => self.push_status(format!("Download completed. Total time: {elapsed}")),
                 Err(err) if err == CANCELLED_ERROR => {
                     self.push_status("ダウンロードをキャンセルしました。".to_string())
                 }
