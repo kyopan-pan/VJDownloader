@@ -13,6 +13,7 @@ mod paths;
 mod search_index;
 mod settings;
 mod settings_ui;
+mod speed_test_ui;
 mod theme;
 mod ui;
 

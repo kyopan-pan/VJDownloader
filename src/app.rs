@@ -1,16 +1,18 @@
 use crate::bundled::ensure_bundled_tools;
 use crate::download::{
-    ensure_deno, ensure_yt_dlp, read_clipboard_text, run_download, DownloadEvent, ProcessTracker,
-    ProgressUpdate, CANCELLED_ERROR,
+    CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressUpdate, ensure_deno, ensure_yt_dlp,
+    read_clipboard_text, run_download,
 };
 use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
-use crate::mac_input_source::{current_mode, InputMode};
+use crate::mac_input_source::{InputMode, current_mode};
 use crate::mac_menu;
 use crate::mac_window;
 use crate::paths::{search_index_db_path, yt_dlp_path};
 use crate::search_index::{SearchEngine, SearchHit, SearchRequest, SearchSort};
-use crate::settings::{save_settings, SettingsData};
+use crate::settings::{SettingsData, save_settings};
 use crate::settings_ui;
+use crate::speed_test_ui;
+use crate::speed_test_ui::SpeedTestUiState;
 use crate::theme::apply_theme;
 use crate::ui;
 use crate::{app_logger::AppLogger, log_ui::LogUiState};
@@ -18,7 +20,7 @@ use drag::{DragItem, Image, Options};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -72,6 +74,7 @@ pub struct DownloaderApp {
     pub(crate) refresh_needed: bool,
     pub(crate) settings_ui: settings_ui::SettingsUiState,
     pub(crate) log_ui: LogUiState,
+    pub(crate) speed_test_ui: SpeedTestUiState,
     pub(crate) status_logs: AppLogger,
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
@@ -146,6 +149,7 @@ impl DownloaderApp {
             refresh_needed: true,
             settings_ui: settings_ui::SettingsUiState::new(),
             log_ui: LogUiState::new(),
+            speed_test_ui: SpeedTestUiState::new(),
             status_logs: AppLogger::new(),
             pending_window_resize: None,
             did_snap: false,
@@ -525,6 +529,9 @@ impl eframe::App for DownloaderApp {
         if mac_menu::take_open_logs_request() {
             self.log_ui.open_logs();
         }
+        if mac_menu::take_open_speed_test_request() {
+            self.speed_test_ui.open_speed_test();
+        }
         self.current_window_size = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.size()));
         if let Some(size) = self.pending_window_resize.take() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
@@ -541,6 +548,7 @@ impl eframe::App for DownloaderApp {
             }
         }
         self.settings_ui.poll_tool_updates();
+        self.speed_test_ui.poll_updates();
         self.settings_ui.auto_refresh_if_needed();
         self.poll_input_mode_change();
         self.poll_download_events();
@@ -548,6 +556,7 @@ impl eframe::App for DownloaderApp {
         self.poll_search_results();
         self.submit_search_if_needed();
         ui::render(self, ctx, _frame);
+        speed_test_ui::render_speed_test_viewport(self, ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
