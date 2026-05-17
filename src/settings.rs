@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::paths::{default_download_dir, make_absolute_path, settings_file_path};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SettingsData {
     pub window_width: String,
     pub window_height: String,
@@ -128,28 +128,17 @@ pub fn save_settings(data: &SettingsData) -> Result<(), String> {
     data.save()
 }
 
-pub fn load_cookie_args() -> Vec<String> {
-    let props = load_settings_properties();
-    let enabled = props
-        .get("cookies.from_browser.enabled")
-        .map(|v| parse_bool(v, false))
-        .unwrap_or(false);
-    if !enabled {
+pub fn cookie_args_from_settings(data: &SettingsData) -> Vec<String> {
+    if !data.cookies_enabled {
         return Vec::new();
     }
-    let browser = props
-        .get("cookies.from_browser.browser")
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    let Some(browser) = browser else {
+    let browser = data.cookies_browser.trim();
+    if browser.is_empty() {
         return Vec::new();
-    };
-    let profile = props
-        .get("cookies.from_browser.profile")
-        .map(|v| v.trim().to_string())
-        .unwrap_or_default();
+    }
+    let profile = data.cookies_profile.trim();
     let value = if profile.is_empty() {
-        browser
+        browser.to_string()
     } else {
         format!("{browser}:{profile}")
     };

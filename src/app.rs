@@ -9,7 +9,7 @@ use crate::mac_menu;
 use crate::mac_window;
 use crate::paths::{search_index_db_path, yt_dlp_path};
 use crate::search_index::{SearchEngine, SearchHit, SearchRequest, SearchSort};
-use crate::settings::{load_cookie_args, save_settings, SettingsData};
+use crate::settings::{save_settings, SettingsData};
 use crate::settings_ui;
 use crate::theme::apply_theme;
 use crate::ui;
@@ -216,7 +216,7 @@ impl DownloaderApp {
         }
 
         let output_dir = self.download_dir.clone();
-        let cookie_args = load_cookie_args();
+        let cookie_args = self.settings_ui.cookie_args();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.download_in_progress = true;

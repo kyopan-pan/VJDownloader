@@ -11,7 +11,7 @@ use crate::download::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
 use crate::fs_utils::is_executable;
 use crate::mac_file_dialog;
 use crate::paths::{default_download_dir, deno_path, make_absolute_path, yt_dlp_path};
-use crate::settings::{SettingsData, save_settings};
+use crate::settings::{cookie_args_from_settings, save_settings, SettingsData};
 
 #[derive(Clone, Copy, Debug)]
 enum ToolKind {
@@ -36,7 +36,22 @@ struct ToolUpdate {
 #[derive(Clone, Debug)]
 struct SettingsForm {
     data: SettingsData,
+    last_saved_data: SettingsData,
+    last_failed_data: Option<SettingsData>,
     error: Option<String>,
+}
+
+impl SettingsForm {
+    fn load() -> Self {
+        let mut data = SettingsData::load();
+        data.cookies_enabled = false;
+        Self {
+            data: data.clone(),
+            last_saved_data: data,
+            last_failed_data: None,
+            error: None,
+        }
+    }
 }
 
 pub struct SettingsUiState {
@@ -58,10 +73,7 @@ impl SettingsUiState {
         let mut state = Self {
             show_settings: false,
             show_initial_setup: !yt_dlp.available,
-            form: SettingsForm {
-                data: SettingsData::load(),
-                error: None,
-            },
+            form: SettingsForm::load(),
             yt_dlp,
             deno,
             tool_tx: tx,
@@ -73,10 +85,7 @@ impl SettingsUiState {
     }
 
     pub fn open_settings(&mut self) {
-        self.form = SettingsForm {
-            data: SettingsData::load(),
-            error: None,
-        };
+        self.form = SettingsForm::load();
         self.show_settings = true;
         self.refresh_all_tools();
     }
@@ -84,6 +93,10 @@ impl SettingsUiState {
     pub fn open_initial_setup(&mut self) {
         self.show_initial_setup = true;
         self.refresh_all_tools();
+    }
+
+    pub fn cookie_args(&self) -> Vec<String> {
+        cookie_args_from_settings(&self.form.data)
     }
 
     pub fn poll_tool_updates(&mut self) {
@@ -338,7 +351,7 @@ fn render_settings_viewport(
                     .default_width(620.0)
                     .open(&mut open)
                     .show(ctx, |ui| {
-                        render_settings_contents(ui, app, &mut close_requested);
+                        render_settings_contents(ui, app);
                     });
                 if !open {
                     close_requested = true;
@@ -346,7 +359,7 @@ fn render_settings_viewport(
             }
             _ => {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    render_settings_contents(ui, app, &mut close_requested);
+                    render_settings_contents(ui, app);
                 });
             }
         }
@@ -422,8 +435,6 @@ fn render_settings_contents(
     ui: &mut egui::Ui,
     // 設定値・ツール状態を保持するアプリ
     app: &mut DownloaderApp,
-    // OK/キャンセルで閉じるべきかのフラグ
-    should_close: &mut bool,
 ) {
     egui::Frame::NONE
         .inner_margin(egui::Margin {
@@ -489,55 +500,11 @@ fn render_settings_contents(
                         );
                     }
 
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let save_btn = egui::Button::new(
-                                egui::RichText::new("OK")
-                                    .size(12.5)
-                                    .color(egui::Color32::from_rgb(8, 14, 24)),
-                            )
-                            .fill(egui::Color32::from_rgb(16, 190, 255));
-                            if pointing(ui.add(save_btn)).clicked() {
-                                if let Err(err) = apply_settings_changes(
-                                    &mut app.settings_ui,
-                                    &mut app.download_dir,
-                                    &mut app.refresh_needed,
-                                    &mut app.pending_window_resize,
-                                ) {
-                                    app.settings_ui.form.error = Some(err);
-                                } else {
-                                    let roots = app.settings_ui.form.data.search_roots.clone();
-                                    match app.sync_search_roots(&roots) {
-                                        Ok(()) => {
-                                            app.settings_ui.form.error = None;
-                                            app.mark_search_dirty();
-                                            *should_close = true;
-                                        }
-                                        Err(err) => {
-                                            app.settings_ui.form.error = Some(format!(
-                                                "検索対象フォルダの同期に失敗しました: {err}"
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-
-                            let cancel_btn = egui::Button::new(
-                                egui::RichText::new("キャンセル")
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(180, 190, 210)),
-                            )
-                            .fill(egui::Color32::from_rgb(24, 30, 45));
-                            if pointing(ui.add(cancel_btn)).clicked() {
-                                *should_close = true;
-                                app.settings_ui.form.error = None;
-                            }
-                        });
-                    });
                     ui.add_space(4.0);
                 });
         });
+
+    auto_save_settings_if_changed(app);
 }
 
 fn initial_setup_viewport_id() -> egui::ViewportId {
@@ -968,6 +935,43 @@ fn apply_settings_changes(
     *refresh_needed = true;
     *pending_resize = Some(egui::vec2(width, height));
     Ok(())
+}
+
+fn auto_save_settings_if_changed(app: &mut DownloaderApp) {
+    let current = app.settings_ui.form.data.clone();
+    if current == app.settings_ui.form.last_saved_data {
+        return;
+    }
+    if app.settings_ui.form.last_failed_data.as_ref() == Some(&current) {
+        return;
+    }
+
+    let previous_roots = app.settings_ui.form.last_saved_data.search_roots.clone();
+    if let Err(err) = apply_settings_changes(
+        &mut app.settings_ui,
+        &mut app.download_dir,
+        &mut app.refresh_needed,
+        &mut app.pending_window_resize,
+    ) {
+        app.settings_ui.form.last_failed_data = Some(current);
+        app.settings_ui.form.error = Some(err);
+        return;
+    }
+
+    let roots = app.settings_ui.form.data.search_roots.clone();
+    if roots != previous_roots {
+        if let Err(err) = app.sync_search_roots(&roots) {
+            app.settings_ui.form.last_failed_data = Some(app.settings_ui.form.data.clone());
+            app.settings_ui.form.error =
+                Some(format!("検索対象フォルダの同期に失敗しました: {err}"));
+            return;
+        }
+        app.mark_search_dirty();
+    }
+
+    app.settings_ui.form.last_saved_data = app.settings_ui.form.data.clone();
+    app.settings_ui.form.last_failed_data = None;
+    app.settings_ui.form.error = None;
 }
 
 fn normalize_search_roots(roots: &[String]) -> Result<Vec<String>, String> {
