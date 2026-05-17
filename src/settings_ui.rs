@@ -11,7 +11,9 @@ use crate::download::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
 use crate::fs_utils::is_executable;
 use crate::mac_file_dialog;
 use crate::paths::{default_download_dir, deno_path, make_absolute_path, yt_dlp_path};
-use crate::settings::{cookie_args_from_settings, save_settings, SettingsData};
+use crate::settings::{
+    ChromeProfile, SettingsData, cookie_args_from_settings, load_chrome_profiles, save_settings,
+};
 
 #[derive(Clone, Copy, Debug)]
 enum ToolKind {
@@ -63,6 +65,7 @@ pub struct SettingsUiState {
     tool_tx: mpsc::Sender<ToolUpdate>,
     tool_rx: mpsc::Receiver<ToolUpdate>,
     last_auto_refresh: Instant,
+    chrome_profiles: Vec<ChromeProfile>,
 }
 
 impl SettingsUiState {
@@ -79,6 +82,7 @@ impl SettingsUiState {
             tool_tx: tx,
             tool_rx: rx,
             last_auto_refresh: Instant::now() - Duration::from_secs(10),
+            chrome_profiles: load_chrome_profiles(),
         };
         state.refresh_all_tools();
         state
@@ -87,6 +91,7 @@ impl SettingsUiState {
     pub fn open_settings(&mut self) {
         self.form = SettingsForm::load();
         self.show_settings = true;
+        self.chrome_profiles = load_chrome_profiles();
         self.refresh_all_tools();
     }
 
@@ -650,11 +655,90 @@ fn render_cookie_section(
                     let profile_hint = "例: Default / Profile 1";
                     let profile_enabled = state.form.data.cookies_enabled;
                     ui.add_enabled_ui(profile_enabled, |ui| {
-                        add_text_input(ui, &mut state.form.data.cookies_profile, 220.0, profile_hint);
+                        render_profile_input(ui, state, 220.0, profile_hint);
                     });
                     ui.end_row();
                 });
         });
+}
+
+fn render_profile_input(ui: &mut egui::Ui, state: &mut SettingsUiState, width: f32, hint: &str) {
+    if state.chrome_profiles.is_empty() || !is_chrome_browser(&state.form.data.cookies_browser) {
+        add_text_input(ui, &mut state.form.data.cookies_profile, width, hint);
+        return;
+    }
+
+    let selected_text = selected_chrome_profile_label(
+        &state.form.data.cookies_profile,
+        &state.chrome_profiles,
+        "指定なし",
+    );
+    ui.add_sized([width, 36.0], |ui: &mut egui::Ui| {
+        egui::ComboBox::from_id_salt("chrome-profile-combo")
+            .width(width)
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut state.form.data.cookies_profile,
+                    String::new(),
+                    "指定なし",
+                );
+                for profile in &state.chrome_profiles {
+                    let label = chrome_profile_label(profile);
+                    ui.selectable_value(
+                        &mut state.form.data.cookies_profile,
+                        profile.id.clone(),
+                        label,
+                    );
+                }
+                let current = state.form.data.cookies_profile.trim().to_string();
+                if !current.is_empty()
+                    && !state
+                        .chrome_profiles
+                        .iter()
+                        .any(|profile| profile.id == current)
+                {
+                    ui.selectable_value(
+                        &mut state.form.data.cookies_profile,
+                        current.clone(),
+                        format!("{current}（現在の設定）"),
+                    );
+                }
+            })
+            .response
+    });
+}
+
+fn is_chrome_browser(browser: &str) -> bool {
+    let browser = browser.trim();
+    browser.is_empty()
+        || browser.eq_ignore_ascii_case("chrome")
+        || browser.eq_ignore_ascii_case("google-chrome")
+        || browser.eq_ignore_ascii_case("google chrome")
+}
+
+fn selected_chrome_profile_label(
+    selected: &str,
+    profiles: &[ChromeProfile],
+    empty_label: &str,
+) -> String {
+    let selected = selected.trim();
+    if selected.is_empty() {
+        return empty_label.to_string();
+    }
+    profiles
+        .iter()
+        .find(|profile| profile.id == selected)
+        .map(chrome_profile_label)
+        .unwrap_or_else(|| format!("{selected}（現在の設定）"))
+}
+
+fn chrome_profile_label(profile: &ChromeProfile) -> String {
+    if profile.display_name == profile.id {
+        profile.id.clone()
+    } else {
+        format!("{} ({})", profile.display_name, profile.id)
+    }
 }
 
 fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -> bool {

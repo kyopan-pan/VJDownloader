@@ -4,6 +4,12 @@ use std::path::PathBuf;
 
 use crate::paths::{default_download_dir, make_absolute_path, settings_file_path};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChromeProfile {
+    pub id: String,
+    pub display_name: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsData {
     pub window_width: String,
@@ -145,6 +151,80 @@ pub fn cookie_args_from_settings(data: &SettingsData) -> Vec<String> {
     vec!["--cookies-from-browser".to_string(), value]
 }
 
+pub fn load_chrome_profiles() -> Vec<ChromeProfile> {
+    let Some(local_state_path) = chrome_local_state_path() else {
+        return Vec::new();
+    };
+    read_chrome_profiles_from_local_state(&local_state_path)
+}
+
+fn chrome_local_state_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(
+        home.join("Library")
+            .join("Application Support")
+            .join("Google")
+            .join("Chrome")
+            .join("Local State"),
+    )
+}
+
+fn read_chrome_profiles_from_local_state(path: &PathBuf) -> Vec<ChromeProfile> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => return Vec::new(),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(json) => json,
+        Err(_) => return Vec::new(),
+    };
+    let Some(info_cache) = json
+        .get("profile")
+        .and_then(|profile| profile.get("info_cache"))
+        .and_then(|info_cache| info_cache.as_object())
+    else {
+        return Vec::new();
+    };
+
+    let mut profiles: Vec<_> = info_cache
+        .iter()
+        .filter_map(|(id, value)| {
+            if id.trim().is_empty() {
+                return None;
+            }
+            let display_name = chrome_profile_display_name(id, value);
+            Some(ChromeProfile {
+                id: id.to_string(),
+                display_name,
+            })
+        })
+        .collect();
+    profiles.sort_by(|a, b| chrome_profile_sort_key(&a.id).cmp(&chrome_profile_sort_key(&b.id)));
+    profiles
+}
+
+fn chrome_profile_display_name(id: &str, value: &serde_json::Value) -> String {
+    for key in ["user_name", "gaia_name", "name"] {
+        if let Some(name) = value.get(key).and_then(|name| name.as_str()) {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    id.to_string()
+}
+
+fn chrome_profile_sort_key(id: &str) -> (u8, u32, String) {
+    if id == "Default" {
+        return (0, 0, id.to_string());
+    }
+    if let Some(number) = id.strip_prefix("Profile ").and_then(|raw| raw.parse().ok()) {
+        return (1, number, id.to_string());
+    }
+    (2, 0, id.to_string())
+}
+
 fn load_settings_properties() -> HashMap<String, String> {
     let path = settings_file_path();
     read_properties_from_path(&path).unwrap_or_default()
@@ -255,4 +335,59 @@ fn decode_path_list(raw: &str) -> Vec<String> {
         out.push(trimmed.to_string());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_chrome_profiles_with_account_name_and_sorted_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Local State");
+        fs::write(
+            &path,
+            r#"{
+                "profile": {
+                    "info_cache": {
+                        "Profile 2": { "name": "Profile 2", "user_name": "work@example.com" },
+                        "Default": { "name": "ユーザー 1" },
+                        "Profile 1": { "name": "Profile 1", "gaia_name": "Personal" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let profiles = read_chrome_profiles_from_local_state(&path);
+
+        assert_eq!(
+            profiles,
+            vec![
+                ChromeProfile {
+                    id: "Default".to_string(),
+                    display_name: "ユーザー 1".to_string(),
+                },
+                ChromeProfile {
+                    id: "Profile 1".to_string(),
+                    display_name: "Personal".to_string(),
+                },
+                ChromeProfile {
+                    id: "Profile 2".to_string(),
+                    display_name: "work@example.com".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_missing_or_invalid_chrome_local_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Local State");
+
+        assert!(read_chrome_profiles_from_local_state(&path).is_empty());
+
+        fs::write(&path, "not json").unwrap();
+        assert!(read_chrome_profiles_from_local_state(&path).is_empty());
+    }
 }
