@@ -14,6 +14,8 @@ mod search_index;
 mod settings;
 mod settings_ui;
 mod speed_test_ui;
+mod stream;
+mod stream_ui;
 mod theme;
 mod ui;
 

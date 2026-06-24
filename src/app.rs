@@ -13,6 +13,8 @@ use crate::settings::{SettingsData, save_settings};
 use crate::settings_ui;
 use crate::speed_test_ui;
 use crate::speed_test_ui::SpeedTestUiState;
+use crate::stream_ui;
+use crate::stream_ui::StreamUiState;
 use crate::theme::apply_theme;
 use crate::ui;
 use crate::{app_logger::AppLogger, log_ui::LogUiState};
@@ -75,6 +77,7 @@ pub struct DownloaderApp {
     pub(crate) settings_ui: settings_ui::SettingsUiState,
     pub(crate) log_ui: LogUiState,
     pub(crate) speed_test_ui: SpeedTestUiState,
+    pub(crate) stream_ui: StreamUiState,
     pub(crate) status_logs: AppLogger,
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
@@ -150,6 +153,7 @@ impl DownloaderApp {
             settings_ui: settings_ui::SettingsUiState::new(),
             log_ui: LogUiState::new(),
             speed_test_ui: SpeedTestUiState::new(),
+            stream_ui: StreamUiState::new(),
             status_logs: AppLogger::new(),
             pending_window_resize: None,
             did_snap: false,
@@ -532,6 +536,9 @@ impl eframe::App for DownloaderApp {
         if mac_menu::take_open_speed_test_request() {
             self.speed_test_ui.open_speed_test();
         }
+        if mac_menu::take_open_stream_request() {
+            self.stream_ui.open_stream();
+        }
         self.current_window_size = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.size()));
         if let Some(size) = self.pending_window_resize.take() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
@@ -549,6 +556,7 @@ impl eframe::App for DownloaderApp {
         }
         self.settings_ui.poll_tool_updates();
         self.speed_test_ui.poll_updates();
+        self.stream_ui.poll_updates();
         self.settings_ui.auto_refresh_if_needed();
         self.poll_input_mode_change();
         self.poll_download_events();
@@ -557,6 +565,7 @@ impl eframe::App for DownloaderApp {
         self.submit_search_if_needed();
         ui::render(self, ctx, _frame);
         speed_test_ui::render_speed_test_viewport(self, ctx);
+        stream_ui::render_stream_viewport(self, ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -12,6 +12,7 @@ mod imp {
     static OPEN_SETTINGS_REQUEST: AtomicBool = AtomicBool::new(false);
     static OPEN_LOGS_REQUEST: AtomicBool = AtomicBool::new(false);
     static OPEN_SPEED_TEST_REQUEST: AtomicBool = AtomicBool::new(false);
+    static OPEN_STREAM_REQUEST: AtomicBool = AtomicBool::new(false);
     static MENU_INSTALLED: OnceLock<()> = OnceLock::new();
     static MENU_TARGET: OnceLock<usize> = OnceLock::new();
 
@@ -31,6 +32,10 @@ mod imp {
 
     pub fn take_open_speed_test_request() -> bool {
         OPEN_SPEED_TEST_REQUEST.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn take_open_stream_request() -> bool {
+        OPEN_STREAM_REQUEST.swap(false, Ordering::Relaxed)
     }
 
     fn install_settings_menu_inner() {
@@ -131,6 +136,32 @@ mod imp {
             let insert_index = if count > 3 { 3 } else { count };
             app_menu.insertItem_atIndex(&item, insert_index);
         }
+
+        if let Some(existing_stream) = find_existing_stream(&app_menu) {
+            unsafe {
+                existing_stream.setTarget(Some(target));
+                existing_stream.setAction(Some(sel!(openStream:)));
+            }
+        } else {
+            let title = NSString::from_str("ストリーム再生...");
+            let key_equivalent = NSString::from_str("");
+            let item = mtm.alloc::<NSMenuItem>();
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    item,
+                    &title,
+                    Some(sel!(openStream:)),
+                    &key_equivalent,
+                )
+            };
+            unsafe {
+                item.setTarget(Some(target));
+            }
+
+            let count = app_menu.numberOfItems();
+            let insert_index = if count > 4 { 4 } else { count };
+            app_menu.insertItem_atIndex(&item, insert_index);
+        }
     }
 
     fn find_existing_preferences(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
@@ -145,6 +176,11 @@ mod imp {
 
     fn find_existing_speed_test(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
         let titles = ["通信速度測定...", "Speed Test..."];
+        find_existing_item_by_titles(menu, &titles)
+    }
+
+    fn find_existing_stream(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
+        let titles = ["ストリーム再生...", "Stream..."];
         find_existing_item_by_titles(menu, &titles)
     }
 
@@ -180,6 +216,7 @@ mod imp {
                     sel!(openSpeedTest:),
                     open_speed_test as extern "C" fn(_, _, _),
                 );
+                builder.add_method(sel!(openStream:), open_stream as extern "C" fn(_, _, _));
             }
             builder.register()
         })
@@ -196,12 +233,16 @@ mod imp {
     extern "C" fn open_speed_test(_this: &AnyObject, _sel: Sel, _sender: *mut AnyObject) {
         OPEN_SPEED_TEST_REQUEST.store(true, Ordering::Relaxed);
     }
+
+    extern "C" fn open_stream(_this: &AnyObject, _sel: Sel, _sender: *mut AnyObject) {
+        OPEN_STREAM_REQUEST.store(true, Ordering::Relaxed);
+    }
 }
 
 #[cfg(target_os = "macos")]
 pub use imp::{
     install_settings_menu, take_open_logs_request, take_open_settings_request,
-    take_open_speed_test_request,
+    take_open_speed_test_request, take_open_stream_request,
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -219,5 +260,10 @@ pub fn take_open_logs_request() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 pub fn take_open_speed_test_request() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn take_open_stream_request() -> bool {
     false
 }

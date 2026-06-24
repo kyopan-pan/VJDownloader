@@ -104,6 +104,22 @@
 - 直リンク取得に失敗した場合、または直リンク経路の`curl`/`ffmpeg`処理が失敗した場合は`yt-dlp --no-playlist --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`の出力をffmpegへパイプする。
 - ffmpegは`-stats -analyzeduration 100M -probesize 100M -c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`を基本とし、直リンク経路・yt-dlpフォールバック経路ともに`-f webm -i pipe:0`を使用する。
 
+## ストリーム再生
+- macOSのメニューバー（Appメニュー）`ストリーム再生...`でストリーム再生画面を開ける。
+- ストリーム再生画面は独立したウィンドウ（eguiビューポート、初期サイズ560x520、最小480x440）として表示する。
+- ストリーム再生画面はウィンドウ内に16:9のミニプレビューを配置し、そこで映像を再生する。
+- `ストリーム開始`ボタンはダウンロードと同様にクリップボードの文字列をそのままURLとして利用する。
+- クリップボードに文字列がない場合はエラーを表示し、再生は開始しない。
+- 再生は外部プレイヤーを使わず、同梱ffmpegでデコードした映像をウィンドウ内テクスチャとして描画する。
+- yt-dlp/ffmpegが見つからない場合はストリーム画面にエラーを表示する。
+- yt-dlpは`--no-playlist`・`youtube:player_client=web`・`youtube:skip=translated_subs`・`-f bv*[height<=480]+ba/b[height<=480]/b`・`--merge-output-format mkv`・`--ffmpeg-location <ffmpeg>`・`--js-runtimes <deno>`・`-o -`で映像+音声を標準出力へ多重化する。
+- その出力を同梱ffmpegへパイプし、映像は`fps=30`・`480x270`へ整形した生RGBA（`-f rawvideo -pix_fmt rgba pipe:1`）として標準出力へ送り、音声は`-f audiotoolbox -audio_device_index -1`でmacOSの既定音声デバイスへ実時間再生する。
+- 音声側がAudioToolboxで実時間再生されるため、映像フレームの供給ペースも再生速度に揃う。
+- プレビューは生RGBAフレームを1枚ずつ読み取り、最新フレームをeguiテクスチャへ反映して描画する。
+- yt-dlp実行時は`~/.vjdownloader/bin`をPATH先頭に追加する。
+- 再生中は`停止`ボタンで実行中のプロセスを終了する。再生終了/停止時はプレビューを消去する。
+- yt-dlp/ffmpegの出力はストリーム画面の状態表示に反映する。
+
 ## 進捗表示
 - 進捗パネルは常に表示され、待機中は半透明表示となる。
 - 進捗メッセージの初期値は`待機中...`。

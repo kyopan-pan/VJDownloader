@@ -16,7 +16,7 @@ use crate::bundled::ensure_bundled_tools;
 use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{ffmpeg_path, yt_dlp_path};
 
-pub use tools::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
+pub use tools::{ensure_deno, ensure_yt_dlp, js_runtime_arg, update_deno, update_yt_dlp};
 
 pub enum DownloadEvent {
     Log(String),
