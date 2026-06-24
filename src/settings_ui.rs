@@ -45,8 +45,7 @@ struct SettingsForm {
 
 impl SettingsForm {
     fn load() -> Self {
-        let mut data = SettingsData::load();
-        data.cookies_enabled = false;
+        let data = SettingsData::load();
         Self {
             data: data.clone(),
             last_saved_data: data,
