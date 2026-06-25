@@ -191,6 +191,27 @@ impl ProcessTracker {
                 .status();
         }
     }
+
+    // 追跡中プロセスへ任意のシグナルを送る（一時停止/再開用）。
+    fn signal_all(&self, signal: &str) {
+        let pids = {
+            let pids = self.pids.lock().unwrap();
+            pids.clone()
+        };
+        for pid in &pids {
+            let _ = Command::new("kill").arg(signal).arg(pid.to_string()).status();
+        }
+    }
+
+    // 追跡中プロセスを一時停止する（SIGSTOP）。
+    pub fn suspend_all(&self) {
+        self.signal_all("-STOP");
+    }
+
+    // 一時停止中のプロセスを再開する（SIGCONT）。
+    pub fn resume_all(&self) {
+        self.signal_all("-CONT");
+    }
 }
 
 // ダウンロード処理のエントリポイント。進捗初期化から完了通知までを統括する。
