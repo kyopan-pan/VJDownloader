@@ -3,8 +3,8 @@ use eframe::emath::GuiRounding;
 
 use crate::app::DownloaderApp;
 use crate::cursor::pointing;
-use crate::log_ui;
-use crate::settings_ui;
+use crate::logs::ui as log_ui;
+use crate::settings::ui as settings_ui;
 
 const PANEL_MIN_WIDTH: f32 = 120.0;
 const DOWNLOAD_PANEL_MAX_RATIO: f32 = 0.5;

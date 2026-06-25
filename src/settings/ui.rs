@@ -9,8 +9,8 @@ use crate::app::DownloaderApp;
 use crate::cursor::pointing;
 use crate::download::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
 use crate::fs_utils::is_executable;
-use crate::mac_file_dialog;
 use crate::paths::{default_download_dir, deno_path, make_absolute_path, yt_dlp_path};
+use crate::platform::file_dialog as mac_file_dialog;
 use crate::settings::{
     ChromeProfile, SettingsData, cookie_args_from_settings, load_chrome_profiles, save_settings,
 };

@@ -250,7 +250,7 @@
 
 ## 日本語検索の扱い
 - 検索用正規化はNFKC + 小文字化（英字吸収）を適用する。
-- 正規化は`src/search_index.rs`の`normalize_for_search`で実装する。
+- 正規化は`src/search_index/`の`normalize_for_search`で実装する。
 - 日本語の表記ゆれ（互換文字・結合文字）をある程度吸収するが、意味的同義語や読み仮名変換は対象外。
 
 ## 監視更新とフォールバック
@@ -270,4 +270,4 @@
 - 監視デバウンス: `DEBOUNCE_WINDOW`（700ms）
 - バッチupsert件数: `UPSERT_BATCH_SIZE`（256）
 - 最大検索件数: `MAX_SEARCH_LIMIT`（1000）
-- これらは`src/search_index.rs`内の定数または関数を変更することで調整できる。
+- これらは`src/search_index/`内の定数または関数を変更することで調整できる。
