@@ -20,7 +20,6 @@ const FORMAT_SELECTOR: &str = "bv*[height<=480]+ba/b[height<=480]/b";
 
 // ストリーム再生中に UI へ通知するイベント。run_id で再生世代を識別する。
 pub enum StreamEvent {
-    Log(String),
     Resolved {
         run_id: u64,
         duration: Option<f64>,
@@ -326,8 +325,6 @@ fn flush_progress_segment(
             run_id,
             secs: start_offset + secs,
         });
-    } else {
-        let _ = tx.send(StreamEvent::Log(text));
     }
 }
 

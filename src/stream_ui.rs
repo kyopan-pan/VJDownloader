@@ -20,7 +20,6 @@ pub struct StreamUiState {
     pub show_stream: bool,
     running: bool,
     paused: bool,
-    status: String,
     error: Option<String>,
     duration: Option<f64>,
     position: f64,
@@ -46,7 +45,6 @@ impl StreamUiState {
             show_stream: false,
             running: false,
             paused: false,
-            status: "待機中...".to_string(),
             error: None,
             duration: None,
             position: 0.0,
@@ -69,11 +67,8 @@ impl StreamUiState {
         self.show_stream = true;
     }
 
-    // クリップボードのURLを解決し、ウィンドウ内プレビューで再生を開始する。
+    // クリップボードのURLを解決して再生を開始する。再生中なら新しい動画へ置き換える。
     fn start_stream(&mut self, cookie_args: Vec<String>) {
-        if self.running {
-            return;
-        }
         let Some(url) = read_clipboard_text() else {
             self.error = Some("クリップボードにURLがありません。".to_string());
             return;
@@ -83,7 +78,6 @@ impl StreamUiState {
         self.running = true;
         self.paused = false;
         self.error = None;
-        self.status = "URL解析中...".to_string();
         self.duration = None;
         self.position = 0.0;
         self.position_instant = None;
@@ -112,7 +106,6 @@ impl StreamUiState {
         self.paused = false;
         self.position = target;
         self.position_instant = None;
-        self.status = "シーク中...".to_string();
 
         let urls = self.media_urls.clone();
         let (run_id, cancel, tracker) = self.begin_run();
@@ -121,6 +114,15 @@ impl StreamUiState {
         thread::spawn(move || {
             run_from_urls(urls, target, run_id, tx, frame_tx, cancel, tracker);
         });
+    }
+
+    // 現在位置から相対シークする（早送り/巻き戻し）。
+    fn seek_relative(&mut self, delta: f64) {
+        if !self.running || self.media_urls.is_empty() {
+            return;
+        }
+        let target = (self.current_position() + delta).max(0.0);
+        self.seek(target);
     }
 
     // 一時停止/再開を切り替える。
@@ -134,7 +136,6 @@ impl StreamUiState {
             }
             self.paused = false;
             self.position_instant = Some(Instant::now());
-            self.status = "再生中...".to_string();
         } else {
             // 現在位置を確定させてから停止する。
             self.position = self.current_position();
@@ -143,7 +144,6 @@ impl StreamUiState {
                 tracker.suspend_all();
             }
             self.paused = true;
-            self.status = "一時停止中".to_string();
         }
     }
 
@@ -164,7 +164,6 @@ impl StreamUiState {
         self.scrubbing = None;
         self.media_urls.clear();
         self.drain_frames();
-        self.status = "停止しました。".to_string();
     }
 
     // 新しい再生世代を採番し、追跡用のフラグ/トラッカーを差し替える。
@@ -205,9 +204,6 @@ impl StreamUiState {
     pub fn poll_updates(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
-                StreamEvent::Log(line) => {
-                    self.status = line;
-                }
                 StreamEvent::Resolved {
                     run_id,
                     duration,
@@ -216,7 +212,6 @@ impl StreamUiState {
                     if run_id == self.run_id {
                         self.duration = duration;
                         self.media_urls = urls;
-                        self.status = "再生中...".to_string();
                     }
                 }
                 StreamEvent::Position { run_id, secs } => {
@@ -236,12 +231,8 @@ impl StreamUiState {
                     self.texture = None;
                     self.position_instant = None;
                     self.drain_frames();
-                    match result {
-                        Ok(()) => self.status = "再生を終了しました。".to_string(),
-                        Err(err) => {
-                            self.status = "待機中...".to_string();
-                            self.error = Some(err);
-                        }
+                    if let Err(err) = result {
+                        self.error = Some(err);
                     }
                 }
             }
@@ -297,6 +288,7 @@ pub fn render_stream_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
     });
 
     if close_requested {
+        app.stream_ui.stop();
         app.stream_ui.show_stream = false;
     }
 }
@@ -325,15 +317,24 @@ fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui
 
             update_preview_texture(app, ctx);
             render_preview(ui, app);
-            ui.add_space(10.0);
+            ui.add_space(8.0);
+
+            render_transport(ui, app);
+            ui.add_space(8.0);
 
             render_seek_bar(ui, app);
             ui.add_space(10.0);
 
             render_controls(ui, app);
-            ui.add_space(10.0);
 
-            render_status_panel(ui, app);
+            if let Some(err) = &app.stream_ui.error {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(err)
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(248, 113, 113)),
+                );
+            }
 
             if app.stream_ui.running && !app.stream_ui.paused {
                 ctx.request_repaint();
@@ -508,77 +509,126 @@ fn render_seek_bar(ui: &mut egui::Ui, app: &mut DownloaderApp) {
     );
 }
 
-fn render_controls(ui: &mut egui::Ui, app: &mut DownloaderApp) {
-    if !app.stream_ui.running {
-        let button = egui::Button::new(
-            egui::RichText::new("ストリーム開始")
-                .size(13.0)
-                .color(egui::Color32::from_rgb(8, 14, 24)),
-        )
-        .fill(egui::Color32::from_rgb(56, 189, 248))
-        .corner_radius(egui::CornerRadius::same(12));
-        if pointing(ui.add_sized([ui.available_width(), 44.0], button)).clicked() {
-            let cookie_args = app.settings_ui.cookie_args();
-            app.stream_ui.start_stream(cookie_args);
-        }
-        return;
-    }
+// 再生/巻き戻し/早送りのアイコンボタン行をプレビュー直下に表示する。
+fn render_transport(ui: &mut egui::Ui, app: &mut DownloaderApp) {
+    let button_size = egui::vec2(56.0, 40.0);
+    let gap = 12.0;
+    let content_width = button_size.x * 3.0 + gap * 2.0;
+    let leading = ((ui.available_width() - content_width) * 0.5).max(0.0);
 
-    let spacing = 10.0;
-    let button_width = (ui.available_width() - spacing) * 0.5;
     ui.horizontal(|ui| {
-        let (pause_label, pause_fill) = if app.stream_ui.paused {
-            ("再生", egui::Color32::from_rgb(56, 189, 248))
+        ui.add_space(leading);
+        if icon_button(ui, TransportIcon::Rewind, button_size).clicked() {
+            app.stream_ui.seek_relative(-0.5);
+        }
+        ui.add_space(gap);
+        let play_icon = if app.stream_ui.running && !app.stream_ui.paused {
+            TransportIcon::Pause
         } else {
-            ("一時停止", egui::Color32::from_rgb(148, 163, 184))
+            TransportIcon::Play
         };
-        let pause_button = egui::Button::new(
-            egui::RichText::new(pause_label)
-                .size(13.0)
-                .color(egui::Color32::from_rgb(8, 14, 24)),
-        )
-        .fill(pause_fill)
-        .corner_radius(egui::CornerRadius::same(12));
-        if pointing(ui.add_sized([button_width, 44.0], pause_button)).clicked() {
+        if icon_button(ui, play_icon, button_size).clicked() {
             app.stream_ui.toggle_pause();
         }
-
-        ui.add_space(spacing);
-
-        let stop_button = egui::Button::new(
-            egui::RichText::new("停止")
-                .size(13.0)
-                .color(egui::Color32::from_rgb(8, 14, 24)),
-        )
-        .fill(egui::Color32::from_rgb(248, 113, 113))
-        .corner_radius(egui::CornerRadius::same(12));
-        if pointing(ui.add_sized([button_width, 44.0], stop_button)).clicked() {
-            app.stream_ui.stop();
+        ui.add_space(gap);
+        if icon_button(ui, TransportIcon::Forward, button_size).clicked() {
+            app.stream_ui.seek_relative(0.5);
         }
     });
 }
 
-fn render_status_panel(ui: &mut egui::Ui, app: &DownloaderApp) {
-    egui::Frame::NONE
-        .fill(egui::Color32::from_rgb(20, 26, 40))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78)))
-        .corner_radius(egui::CornerRadius::same(14))
-        .inner_margin(egui::Margin::symmetric(14, 10))
-        .show(ui, |ui| {
-            if let Some(err) = &app.stream_ui.error {
-                ui.label(
-                    egui::RichText::new(err)
-                        .size(12.5)
-                        .color(egui::Color32::from_rgb(248, 113, 113)),
-                );
-                return;
-            }
-            ui.label(
-                egui::RichText::new(&app.stream_ui.status)
-                    .size(12.0)
-                    .color(egui::Color32::from_rgb(203, 213, 225)),
+enum TransportIcon {
+    Rewind,
+    Play,
+    Pause,
+    Forward,
+}
+
+// アイコンを描画するボタン。背景＋ベクター図形でアイコンを描く。
+fn icon_button(ui: &mut egui::Ui, icon: TransportIcon, size: egui::Vec2) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let background = if response.hovered() {
+        egui::Color32::from_rgb(40, 56, 78)
+    } else {
+        egui::Color32::from_rgb(30, 38, 56)
+    };
+    let color = egui::Color32::from_rgb(224, 232, 246);
+    let center = rect.center();
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::same(10), background);
+
+    match icon {
+        TransportIcon::Play => draw_triangle(painter, center, 9.0, true, color),
+        TransportIcon::Pause => {
+            let bar = egui::vec2(4.5, 16.0);
+            let offset = 4.5;
+            let rounding = egui::CornerRadius::same(2);
+            painter.rect_filled(
+                egui::Rect::from_center_size(egui::pos2(center.x - offset, center.y), bar),
+                rounding,
+                color,
             );
-        });
+            painter.rect_filled(
+                egui::Rect::from_center_size(egui::pos2(center.x + offset, center.y), bar),
+                rounding,
+                color,
+            );
+        }
+        TransportIcon::Rewind => {
+            draw_triangle(painter, egui::pos2(center.x - 5.0, center.y), 7.0, false, color);
+            draw_triangle(painter, egui::pos2(center.x + 6.0, center.y), 7.0, false, color);
+        }
+        TransportIcon::Forward => {
+            draw_triangle(painter, egui::pos2(center.x - 6.0, center.y), 7.0, true, color);
+            draw_triangle(painter, egui::pos2(center.x + 5.0, center.y), 7.0, true, color);
+        }
+    }
+
+    pointing(response)
+}
+
+// 再生/シーク用の三角アイコンを描く。
+fn draw_triangle(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    half: f32,
+    pointing_right: bool,
+    color: egui::Color32,
+) {
+    let points = if pointing_right {
+        vec![
+            egui::pos2(center.x - half * 0.8, center.y - half),
+            egui::pos2(center.x - half * 0.8, center.y + half),
+            egui::pos2(center.x + half, center.y),
+        ]
+    } else {
+        vec![
+            egui::pos2(center.x + half * 0.8, center.y - half),
+            egui::pos2(center.x + half * 0.8, center.y + half),
+            egui::pos2(center.x - half, center.y),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
+}
+
+// プレビュー下部のメインボタン（停止中は開始、再生中はクリップボードURLで置換）。
+fn render_controls(ui: &mut egui::Ui, app: &mut DownloaderApp) {
+    let label = if app.stream_ui.running {
+        "ストリーム"
+    } else {
+        "ストリーム開始"
+    };
+    let button = egui::Button::new(
+        egui::RichText::new(label)
+            .size(13.0)
+            .color(egui::Color32::from_rgb(8, 14, 24)),
+    )
+    .fill(egui::Color32::from_rgb(56, 189, 248))
+    .corner_radius(egui::CornerRadius::same(12));
+    if pointing(ui.add_sized([ui.available_width(), 44.0], button)).clicked() {
+        let cookie_args = app.settings_ui.cookie_args();
+        app.stream_ui.start_stream(cookie_args);
+    }
 }
 
 fn format_time(seconds: f64) -> String {
