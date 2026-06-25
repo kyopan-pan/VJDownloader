@@ -340,8 +340,6 @@ fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui
             render_seek_bar(ui, app);
             ui.add_space(10.0);
 
-            render_controls(ui, app);
-
             if let Some(err) = &app.stream_ui.error {
                 ui.add_space(8.0);
                 ui.label(
@@ -525,11 +523,14 @@ fn render_seek_bar(ui: &mut egui::Ui, app: &mut DownloaderApp) {
 }
 
 // 再生/巻き戻し/早送りのアイコンボタン行をプレビュー直下に表示する。
+// ストリーム開始/置換（Enter マーク）ボタンは同じ行の右端に配置する。
 fn render_transport(ui: &mut egui::Ui, app: &mut DownloaderApp) {
     let button_size = egui::vec2(56.0, 40.0);
+    let enter_size = egui::vec2(48.0, 40.0);
     let gap = 12.0;
     let content_width = button_size.x * 3.0 + gap * 2.0;
-    let leading = ((ui.available_width() - content_width) * 0.5).max(0.0);
+    let total_width = ui.available_width();
+    let leading = ((total_width - content_width) * 0.5).max(0.0);
 
     ui.horizontal(|ui| {
         ui.add_space(leading);
@@ -549,6 +550,14 @@ fn render_transport(ui: &mut egui::Ui, app: &mut DownloaderApp) {
         if icon_button(ui, TransportIcon::Forward, button_size).clicked() {
             app.stream_ui.seek_relative(0.5);
         }
+
+        // 残りの領域を使って Enter ボタンを内容領域の右端へ揃える（右寄せレイアウト）。
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if icon_button(ui, TransportIcon::Enter, enter_size).clicked() {
+                let cookie_args = app.settings_ui.cookie_args();
+                app.stream_ui.start_stream(cookie_args);
+            }
+        });
     });
 }
 
@@ -557,6 +566,7 @@ enum TransportIcon {
     Play,
     Pause,
     Forward,
+    Enter,
 }
 
 // アイコンを描画するボタン。背景＋ベクター図形でアイコンを描く。
@@ -597,6 +607,7 @@ fn icon_button(ui: &mut egui::Ui, icon: TransportIcon, size: egui::Vec2) -> egui
             draw_triangle(painter, egui::pos2(center.x - 6.0, center.y), 7.0, true, color);
             draw_triangle(painter, egui::pos2(center.x + 5.0, center.y), 7.0, true, color);
         }
+        TransportIcon::Enter => draw_enter_mark(painter, center, color),
     }
 
     pointing(response)
@@ -626,24 +637,24 @@ fn draw_triangle(
     painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
 }
 
-// プレビュー下部のメインボタン（停止中は開始、再生中はクリップボードURLで置換）。
-fn render_controls(ui: &mut egui::Ui, app: &mut DownloaderApp) {
-    let label = if app.stream_ui.running {
-        "ストリーム"
-    } else {
-        "ストリーム開始"
-    };
-    let button = egui::Button::new(
-        egui::RichText::new(label)
-            .size(13.0)
-            .color(egui::Color32::from_rgb(8, 14, 24)),
-    )
-    .fill(egui::Color32::from_rgb(56, 189, 248))
-    .corner_radius(egui::CornerRadius::same(12));
-    if pointing(ui.add_sized([ui.available_width(), 44.0], button)).clicked() {
-        let cookie_args = app.settings_ui.cookie_args();
-        app.stream_ui.start_stream(cookie_args);
-    }
+// Enter（リターン）マークを描く。右上から下→左へ折れて左向き矢じりで終わる矢印。
+fn draw_enter_mark(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+    let stroke = egui::Stroke::new(2.0, color);
+    let c = center;
+    let top = egui::pos2(c.x + 6.0, c.y - 7.0);
+    let corner = egui::pos2(c.x + 6.0, c.y + 2.0);
+    let left = egui::pos2(c.x - 5.0, c.y + 2.0);
+    painter.line_segment([top, corner], stroke);
+    painter.line_segment([corner, left], stroke);
+
+    // 左向きの矢じり。
+    let tip = egui::pos2(c.x - 7.0, c.y + 2.0);
+    let head = vec![
+        tip,
+        egui::pos2(c.x - 2.0, c.y - 2.0),
+        egui::pos2(c.x - 2.0, c.y + 6.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(head, color, egui::Stroke::NONE));
 }
 
 fn format_time(seconds: f64) -> String {
