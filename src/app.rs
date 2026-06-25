@@ -334,10 +334,20 @@ impl DownloaderApp {
             }
         }
 
+        // キャンセルで強制終了したプロセスが吐く終了エラー出力はログに残さない。
+        let cancelling = self
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed));
+
         let mut done = None;
         for event in events {
             match event {
-                DownloadEvent::Log(line) => self.push_status(line),
+                DownloadEvent::Log(line) => {
+                    if !cancelling {
+                        self.push_status(line);
+                    }
+                }
                 DownloadEvent::Progress(update) => self.handle_progress_update(update),
                 DownloadEvent::Done(result, elapsed) => done = Some((result, elapsed)),
             }

@@ -126,25 +126,51 @@ impl StreamUiState {
     }
 
     // 一時停止/再開を切り替える。
+    //
+    // SIGSTOP で ffmpeg を凍結する方式だと、CoreAudio に積まれた先読み音声バッファが
+    // 解放されず再生され続け（音声がループする）ため、一時停止では ffmpeg を正常終了させ、
+    // 再開時に現在位置から再起動する（シークと同じ仕組み）。正常終了時に ffmpeg が
+    // オーディオキューを破棄するため、停止直後の音声ループが起きない。
     fn toggle_pause(&mut self) {
         if !self.running {
             return;
         }
         if self.paused {
-            if let Some(tracker) = self.tracker.as_ref() {
-                tracker.resume_all();
-            }
-            self.paused = false;
-            self.position_instant = Some(Instant::now());
+            self.resume_from_pause();
         } else {
-            // 現在位置を確定させてから停止する。
+            // 現在位置を確定させ、ffmpeg を停止して静止する。
             self.position = self.current_position();
             self.position_instant = None;
+            // 旧プロセスの Finished イベントを無視するため世代を進めてから終了させる。
+            self.run_id += 1;
             if let Some(tracker) = self.tracker.as_ref() {
-                tracker.suspend_all();
+                tracker.terminate_all();
             }
+            self.cancel_flag = None;
+            self.tracker = None;
             self.paused = true;
+            self.drain_frames();
         }
+    }
+
+    // 一時停止中の位置から ffmpeg を再起動して再生を再開する。
+    fn resume_from_pause(&mut self) {
+        if self.media_urls.is_empty() {
+            // URL 未解決などで再開できない場合は単に再生状態へ戻す。
+            self.paused = false;
+            return;
+        }
+        let urls = self.media_urls.clone();
+        let target = self.position;
+        self.paused = false;
+        self.position_instant = None;
+
+        let (run_id, cancel, tracker) = self.begin_run();
+        let tx = self.tx.clone();
+        let frame_tx = self.frame_tx.clone();
+        thread::spawn(move || {
+            run_from_urls(urls, target, run_id, tx, frame_tx, cancel, tracker);
+        });
     }
 
     // 再生を停止して状態を初期化する。
@@ -302,17 +328,6 @@ fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui
             bottom: 16,
         })
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("ストリーム再生")
-                    .size(18.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(220, 230, 245)),
-            );
-            ui.label(
-                egui::RichText::new("クリップボードのURLをこのウィンドウ内で再生します。")
-                    .size(12.0)
-                    .color(egui::Color32::from_rgb(140, 150, 170)),
-            );
             ui.add_space(12.0);
 
             update_preview_texture(app, ctx);
