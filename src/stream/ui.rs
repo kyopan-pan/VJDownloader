@@ -511,12 +511,15 @@ fn render_seek_bar(ui: &mut egui::Ui, app: &mut DownloaderApp) {
     }
 
     ui.add_space(4.0);
-    let total_label = match duration {
-        Some(dur) => format_time(dur),
-        None => "--:--".to_string(),
+    // 総時間が確定するまで（停止中・読み込み中）は現在位置・総時間ともにプレースホルダ表示にする。
+    let time_label = match duration {
+        Some(dur) if app.stream_ui.running => {
+            format!("{} / {}", format_time(display_position), format_time(dur))
+        }
+        _ => "--:-- / --:--".to_string(),
     };
     ui.label(
-        egui::RichText::new(format!("{} / {}", format_time(display_position), total_label))
+        egui::RichText::new(time_label)
             .size(11.5)
             .color(egui::Color32::from_rgb(170, 180, 200)),
     );
