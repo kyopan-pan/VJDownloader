@@ -14,6 +14,10 @@ use crate::stream::{
 };
 
 // ジッタ吸収用フレームバッファの上限（暴走時の安全弁）。
+// 高解像度(Syphon)時は1フレームが大きいためメモリを抑える。
+#[cfg(feature = "syphon")]
+const MAX_FRAME_BUFFER: usize = 12;
+#[cfg(not(feature = "syphon"))]
 const MAX_FRAME_BUFFER: usize = 120;
 
 // 1 つの再生デッキ。A/B それぞれが独立した ffmpeg パイプラインと状態を持つ。
@@ -37,6 +41,9 @@ struct StreamDeck {
     rx: mpsc::Receiver<StreamEvent>,
     frame_tx: mpsc::Sender<StreamFrame>,
     frame_rx: mpsc::Receiver<StreamFrame>,
+    // マスター合成（Syphon配信）用に直近の提示フレームを保持する。
+    #[cfg(feature = "syphon")]
+    last_rgba: Option<Vec<u8>>,
 }
 
 impl StreamDeck {
@@ -63,6 +70,8 @@ impl StreamDeck {
             rx,
             frame_tx,
             frame_rx,
+            #[cfg(feature = "syphon")]
+            last_rgba: None,
         }
     }
 
@@ -189,6 +198,10 @@ impl StreamDeck {
         self.scrubbing = None;
         self.media_urls.clear();
         self.drain_frames();
+        #[cfg(feature = "syphon")]
+        {
+            self.last_rgba = None;
+        }
     }
 
     // 新しい再生世代を採番し、追跡用のフラグ/トラッカーを差し替える。
@@ -321,6 +334,11 @@ impl StreamDeck {
                     Some(ctx.load_texture(self.texture_name, image, egui::TextureOptions::LINEAR));
             }
         }
+        // マスター合成用に直近フレームを保持（ColorImage は上でコピー済みなので move 可）。
+        #[cfg(feature = "syphon")]
+        {
+            self.last_rgba = Some(frame.rgba);
+        }
     }
 }
 
@@ -330,6 +348,11 @@ pub struct StreamUiState {
     deck_b: StreamDeck,
     // マスタークロスフェード。0.0 = A のみ、1.0 = B のみ。
     fader: f32,
+    // Syphon 出力（マスターを VDMX 等へ送信）の有効/無効とサーバ実体。
+    #[cfg(feature = "syphon")]
+    syphon_enabled: bool,
+    #[cfg(feature = "syphon")]
+    syphon: Option<crate::stream::syphon::SyphonPublisher>,
 }
 
 impl StreamUiState {
@@ -339,7 +362,38 @@ impl StreamUiState {
             deck_a: StreamDeck::new("A", "stream_preview_a"),
             deck_b: StreamDeck::new("B", "stream_preview_b"),
             fader: 0.0,
+            #[cfg(feature = "syphon")]
+            syphon_enabled: false,
+            #[cfg(feature = "syphon")]
+            syphon: None,
         }
+    }
+
+    // マスター（A*(1-f)+B*f）を BGRA8 でCPU合成する。Syphon配信用。
+    #[cfg(feature = "syphon")]
+    fn master_bgra(&self) -> Vec<u8> {
+        let w = PREVIEW_WIDTH;
+        let h = PREVIEW_HEIGHT;
+        let count = w * h;
+        let f = self.fader.clamp(0.0, 1.0);
+        let inv = 1.0 - f;
+        let a = self.deck_a.last_rgba.as_deref();
+        let b = self.deck_b.last_rgba.as_deref();
+        let mut out = vec![0u8; count * 4];
+        for i in 0..count {
+            let p = i * 4;
+            let (ar, ag, ab) = rgb_at(a, p);
+            let (br, bg, bb) = rgb_at(b, p);
+            let r = (ar as f32 * inv + br as f32 * f) as u8;
+            let g = (ag as f32 * inv + bg as f32 * f) as u8;
+            let bl = (ab as f32 * inv + bb as f32 * f) as u8;
+            // Syphon(Metal) は BGRA8 を期待するため並びを入れ替える。
+            out[p] = bl;
+            out[p + 1] = g;
+            out[p + 2] = r;
+            out[p + 3] = 255;
+        }
+        out
     }
 
     pub fn open_stream(&mut self) {
@@ -437,22 +491,98 @@ fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui
             let master_w = deck_w * 0.55;
 
             let active = stream.deck_a.is_active() || stream.deck_b.is_active();
-            // フェーダーは中央カラム（小プレビュー直下）に置くため、デッキとは別個に借用する。
-            let StreamUiState {
-                deck_a,
-                deck_b,
-                fader,
-                ..
-            } = stream;
 
-            render_top_row(ui, deck_a, deck_b, fader, deck_w, master_w, gap);
+            // フェーダーは中央カラムに置くため、デッキは不変・フェーダーは可変で同時借用する
+            //（いずれも別フィールドなので分離借用が成立する）。
+            render_top_row(
+                ui,
+                &stream.deck_a,
+                &stream.deck_b,
+                &mut stream.fader,
+                deck_w,
+                master_w,
+                gap,
+            );
             ui.add_space(8.0);
-            render_controls_row(ui, deck_a, deck_b, &cookie_args, deck_w, master_w, gap);
+            render_controls_row(
+                ui,
+                &mut stream.deck_a,
+                &mut stream.deck_b,
+                &cookie_args,
+                deck_w,
+                master_w,
+                gap,
+            );
+
+            // Syphon 出力トグルとマスター配信（フィーチャー有効時のみ）。
+            #[cfg(feature = "syphon")]
+            {
+                render_syphon_toggle(ui, stream);
+                publish_master(stream, ctx);
+            }
 
             if active {
                 ctx.request_repaint();
             }
         });
+}
+
+// last_rgba から RGB を取り出す（範囲外/未保持は黒）。
+#[cfg(feature = "syphon")]
+fn rgb_at(buf: Option<&[u8]>, p: usize) -> (u8, u8, u8) {
+    match buf {
+        Some(b) if p + 2 < b.len() => (b[p], b[p + 1], b[p + 2]),
+        _ => (0, 0, 0),
+    }
+}
+
+// Syphon 出力の ON/OFF トグル。
+#[cfg(feature = "syphon")]
+fn render_syphon_toggle(ui: &mut egui::Ui, stream: &mut StreamUiState) {
+    ui.add_space(8.0);
+    ui.vertical_centered(|ui| {
+        ui.checkbox(
+            &mut stream.syphon_enabled,
+            "Syphon出力（マスターをVDMX等へ送信）",
+        );
+        if stream.syphon_enabled {
+            let status = if stream.syphon.is_some() {
+                "配信中: VJDownloader Master"
+            } else {
+                "初期化待ち…（Syphon.framework 未リンク時は無効）"
+            };
+            ui.label(
+                egui::RichText::new(status)
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 160, 180)),
+            );
+        }
+    });
+    // OFF にしたらサーバを破棄。
+    if !stream.syphon_enabled {
+        stream.syphon = None;
+    }
+}
+
+// マスターを Syphon サーバへ1フレーム配信する。
+#[cfg(feature = "syphon")]
+fn publish_master(stream: &mut StreamUiState, ctx: &egui::Context) {
+    if !stream.syphon_enabled {
+        return;
+    }
+    if stream.syphon.is_none() {
+        stream.syphon = crate::stream::syphon::SyphonPublisher::new(
+            PREVIEW_WIDTH,
+            PREVIEW_HEIGHT,
+            "VJDownloader Master",
+        );
+    }
+    if let Some(publisher) = stream.syphon.as_ref() {
+        let bgra = stream.master_bgra();
+        publisher.publish(&bgra);
+        // 連続配信のため再描画を要求する。
+        ctx.request_repaint();
+    }
 }
 
 // 上段: A プレビュー / 中央カラム（小マスタープレビュー＋直下にフェーダー） / B プレビュー。

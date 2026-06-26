@@ -1,5 +1,10 @@
 pub mod ui;
 
+// Syphon 出力（マスターを VDMX 等へ共有）。公式 Syphon.framework をリンクする
+// `syphon` フィーチャー有効時のみ有効化される。
+#[cfg(feature = "syphon")]
+pub mod syphon;
+
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -11,13 +16,24 @@ use crate::download::{ProcessTracker, js_runtime_arg};
 use crate::fs_utils::is_executable;
 use crate::paths::{bin_dir, ffmpeg_path, yt_dlp_path};
 
-// ウィンドウ内ミニプレビューのデコード解像度（固定サイズの生RGBAフレーム）。
+// デコード解像度（固定サイズの生RGBAフレーム）。
+// Syphon 出力時はマスターを高解像度で配信するため 1280x720、通常は軽量な 480x270。
+#[cfg(feature = "syphon")]
+pub const PREVIEW_WIDTH: usize = 1280;
+#[cfg(feature = "syphon")]
+pub const PREVIEW_HEIGHT: usize = 720;
+#[cfg(not(feature = "syphon"))]
 pub const PREVIEW_WIDTH: usize = 480;
+#[cfg(not(feature = "syphon"))]
 pub const PREVIEW_HEIGHT: usize = 270;
+
 // プレビューは固定フレームレート(CFR)でデコードし、フレーム番号から提示時刻(PTS)を算出する。
 pub const PREVIEW_FPS: f64 = 30.0;
 const FRAME_BYTES: usize = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
 
+#[cfg(feature = "syphon")]
+const FORMAT_SELECTOR: &str = "bv*[height<=720]+ba/b[height<=720]/b";
+#[cfg(not(feature = "syphon"))]
 const FORMAT_SELECTOR: &str = "bv*[height<=480]+ba/b[height<=480]/b";
 
 // ストリーム再生中に UI へ通知するイベント。run_id で再生世代を識別する。

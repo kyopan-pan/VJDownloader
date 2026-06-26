@@ -19,10 +19,18 @@ time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"]
 [dev-dependencies]
 tempfile = "3.25.0"
 
+[features]
+# 公式 Syphon.framework をリンクし、マスター映像を Syphon サーバとして配信する。
+# ビルドには Syphon.framework（full Xcode でビルド）が必要。詳細は build.rs / CI 参照。
+syphon = ["dep:objc2-metal", "dep:objc2-core-foundation"]
+
 [profile.dev]
 debug-assertions = false
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSString", "NSObject", "NSThread", "NSURL"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSString", "NSObject", "NSThread", "NSURL", "NSDictionary", "NSGeometry"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSMenu", "NSMenuItem", "NSEvent", "NSOpenPanel", "NSPanel", "NSSavePanel", "NSWindow", "NSResponder", "NSImage"] }
+# Syphon 出力用（`syphon` フィーチャー時のみ）。
+objc2-metal = { version = "0.3.2", optional = true }
+objc2-core-foundation = { version = "0.3.2", optional = true, features = ["CFCGTypes"] }
