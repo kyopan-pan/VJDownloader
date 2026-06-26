@@ -16,8 +16,10 @@ use crate::stream::{
 // ジッタ吸収用フレームバッファの上限（暴走時の安全弁）。
 const MAX_FRAME_BUFFER: usize = 120;
 
-pub struct StreamUiState {
-    pub show_stream: bool,
+// 1 つの再生デッキ。A/B それぞれが独立した ffmpeg パイプラインと状態を持つ。
+struct StreamDeck {
+    label: &'static str,
+    texture_name: &'static str,
     running: bool,
     paused: bool,
     error: Option<String>,
@@ -37,12 +39,13 @@ pub struct StreamUiState {
     frame_rx: mpsc::Receiver<StreamFrame>,
 }
 
-impl StreamUiState {
-    pub fn new() -> Self {
+impl StreamDeck {
+    fn new(label: &'static str, texture_name: &'static str) -> Self {
         let (tx, rx) = mpsc::channel();
         let (frame_tx, frame_rx) = mpsc::channel();
         Self {
-            show_stream: false,
+            label,
+            texture_name,
             running: false,
             paused: false,
             error: None,
@@ -61,10 +64,6 @@ impl StreamUiState {
             frame_tx,
             frame_rx,
         }
-    }
-
-    pub fn open_stream(&mut self) {
-        self.show_stream = true;
     }
 
     // クリップボードのURLを解決して再生を開始する。再生中なら新しい動画へ置き換える。
@@ -227,7 +226,12 @@ impl StreamUiState {
         self.frame_buffer.clear();
     }
 
-    pub fn poll_updates(&mut self) {
+    // 再生中（一時停止していない）かどうか。再描画要求の判定に使う。
+    fn is_active(&self) -> bool {
+        self.running && !self.paused
+    }
+
+    fn poll_updates(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 StreamEvent::Resolved {
@@ -264,6 +268,93 @@ impl StreamUiState {
             }
         }
     }
+
+    // 受信フレームをバッファへ取り込み、再生クロックに沿った1枚をテクスチャへ反映する。
+    fn update_texture(&mut self, ctx: &egui::Context) {
+        let run_id = self.run_id;
+
+        // 現世代のフレームのみバッファへ蓄積する。
+        while let Ok(frame) = self.frame_rx.try_recv() {
+            if frame.run_id == run_id {
+                self.frame_buffer.push_back(frame);
+            }
+        }
+        while self.frame_buffer.len() > MAX_FRAME_BUFFER {
+            self.frame_buffer.pop_front();
+        }
+
+        // 一時停止中・停止中は更新しない（直近フレームで静止）。
+        if !self.running || self.paused {
+            return;
+        }
+
+        let chosen = if self.position_instant.is_some() {
+            // 再生クロック確立後は、現在時刻までに到達したフレームの最新を提示する。
+            let clock = self.current_position();
+            let tolerance = 0.5 / PREVIEW_FPS;
+            let mut chosen = None;
+            while self
+                .frame_buffer
+                .front()
+                .is_some_and(|frame| frame.pts <= clock + tolerance)
+            {
+                chosen = self.frame_buffer.pop_front();
+            }
+            chosen
+        } else {
+            // クロック未確立（解析/バッファリング中）は最新フレームを即時提示する。
+            let mut chosen = None;
+            while let Some(frame) = self.frame_buffer.pop_front() {
+                chosen = Some(frame);
+            }
+            chosen
+        };
+
+        let Some(frame) = chosen else {
+            return;
+        };
+        let image = egui::ColorImage::from_rgba_unmultiplied(frame.size, &frame.rgba);
+        match self.texture.as_mut() {
+            Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+            None => {
+                self.texture =
+                    Some(ctx.load_texture(self.texture_name, image, egui::TextureOptions::LINEAR));
+            }
+        }
+    }
+}
+
+pub struct StreamUiState {
+    pub show_stream: bool,
+    deck_a: StreamDeck,
+    deck_b: StreamDeck,
+    // マスタークロスフェード。0.0 = A のみ、1.0 = B のみ。
+    fader: f32,
+}
+
+impl StreamUiState {
+    pub fn new() -> Self {
+        Self {
+            show_stream: false,
+            deck_a: StreamDeck::new("A", "stream_preview_a"),
+            deck_b: StreamDeck::new("B", "stream_preview_b"),
+            fader: 0.0,
+        }
+    }
+
+    pub fn open_stream(&mut self) {
+        self.show_stream = true;
+    }
+
+    fn stop_all(&mut self) {
+        self.deck_a.stop();
+        self.deck_b.stop();
+    }
+
+    pub fn poll_updates(&mut self) {
+        self.deck_a.poll_updates();
+        self.deck_b.poll_updates();
+    }
 }
 
 impl Default for StreamUiState {
@@ -281,8 +372,8 @@ pub fn render_stream_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
     let viewport_id = stream_viewport_id();
     let builder = egui::ViewportBuilder::default()
         .with_title("ストリーム再生")
-        .with_inner_size(egui::vec2(560.0, 560.0))
-        .with_min_inner_size(egui::vec2(480.0, 480.0))
+        .with_inner_size(egui::vec2(940.0, 640.0))
+        .with_min_inner_size(egui::vec2(760.0, 540.0))
         .with_always_on_top();
 
     ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
@@ -296,7 +387,7 @@ pub fn render_stream_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
                 egui::Window::new("ストリーム再生")
                     .collapsible(false)
                     .resizable(true)
-                    .default_width(540.0)
+                    .default_width(900.0)
                     .open(&mut open)
                     .show(ctx, |ui| {
                         render_stream_contents(ui, app, ctx);
@@ -314,12 +405,16 @@ pub fn render_stream_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
     });
 
     if close_requested {
-        app.stream_ui.stop();
+        app.stream_ui.stop_all();
         app.stream_ui.show_stream = false;
     }
 }
 
 fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui::Context) {
+    // 読み込みに使う cookie 引数を先に取り出して、以後は stream_ui を排他借用する。
+    let cookie_args = app.settings_ui.cookie_args();
+    let stream = &mut app.stream_ui;
+
     egui::Frame::NONE
         .inner_margin(egui::Margin {
             left: 16,
@@ -328,105 +423,115 @@ fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui
             bottom: 16,
         })
         .show(ui, |ui| {
-            ui.add_space(12.0);
-
-            update_preview_texture(app, ctx);
-            render_preview(ui, app);
             ui.add_space(8.0);
 
-            render_transport(ui, app);
+            stream.deck_a.update_texture(ctx);
+            stream.deck_b.update_texture(ctx);
+
+            // プレビュー行とコントロール行で同じ3分割（A幅｜マスター幅｜B幅）を共有し、
+            // 各デッキの操作UIがそのプレビューの真下に揃うようにする。
+            // 丸め誤差での横オーバーフローを避けるため、合計幅にわずかな余白を残す。
+            let gap = 12.0;
+            let avail = ui.available_width();
+            let deck_w = ((avail - gap * 2.0 - 4.0) / 2.55).floor().max(120.0);
+            let master_w = deck_w * 0.55;
+
+            let active = stream.deck_a.is_active() || stream.deck_b.is_active();
+            // フェーダーは中央カラム（小プレビュー直下）に置くため、デッキとは別個に借用する。
+            let StreamUiState {
+                deck_a,
+                deck_b,
+                fader,
+                ..
+            } = stream;
+
+            render_top_row(ui, deck_a, deck_b, fader, deck_w, master_w, gap);
             ui.add_space(8.0);
+            render_controls_row(ui, deck_a, deck_b, &cookie_args, deck_w, master_w, gap);
 
-            render_seek_bar(ui, app);
-            ui.add_space(10.0);
-
-            if let Some(err) = &app.stream_ui.error {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(err)
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(248, 113, 113)),
-                );
-            }
-
-            if app.stream_ui.running && !app.stream_ui.paused {
+            if active {
                 ctx.request_repaint();
             }
         });
 }
 
-// 受信フレームをバッファへ取り込み、再生クロックに沿った1枚をテクスチャへ反映する。
-fn update_preview_texture(app: &mut DownloaderApp, ctx: &egui::Context) {
-    let run_id = app.stream_ui.run_id;
+// 上段: A プレビュー / 中央カラム（小マスタープレビュー＋直下にフェーダー） / B プレビュー。
+// 中央カラムは大プレビューの高さに対して縦中央へ寄せ、フェーダーは小プレビューの真下に密着させる。
+fn render_top_row(
+    ui: &mut egui::Ui,
+    deck_a: &StreamDeck,
+    deck_b: &StreamDeck,
+    fader: &mut f32,
+    deck_w: f32,
+    master_w: f32,
+    gap: f32,
+) {
+    let deck_h = deck_w * PREVIEW_HEIGHT as f32 / PREVIEW_WIDTH as f32;
+    let master_h = master_w * PREVIEW_HEIGHT as f32 / PREVIEW_WIDTH as f32;
+    let fader_h = 22.0;
+    let group_h = master_h + 6.0 + fader_h;
+    let top_pad = ((deck_h - group_h) * 0.5).max(0.0);
 
-    // 現世代のフレームのみバッファへ蓄積する。
-    while let Ok(frame) = app.stream_ui.frame_rx.try_recv() {
-        if frame.run_id == run_id {
-            app.stream_ui.frame_buffer.push_back(frame);
-        }
-    }
-    while app.stream_ui.frame_buffer.len() > MAX_FRAME_BUFFER {
-        app.stream_ui.frame_buffer.pop_front();
-    }
-
-    // 一時停止中・停止中は更新しない（直近フレームで静止）。
-    if !app.stream_ui.running || app.stream_ui.paused {
-        return;
-    }
-
-    let chosen = if app.stream_ui.position_instant.is_some() {
-        // 再生クロック確立後は、現在時刻までに到達したフレームの最新を提示する。
-        let clock = app.stream_ui.current_position();
-        let tolerance = 0.5 / PREVIEW_FPS;
-        let mut chosen = None;
-        while app
-            .stream_ui
-            .frame_buffer
-            .front()
-            .is_some_and(|frame| frame.pts <= clock + tolerance)
-        {
-            chosen = app.stream_ui.frame_buffer.pop_front();
-        }
-        chosen
-    } else {
-        // クロック未確立（解析/バッファリング中）は最新フレームを即時提示する。
-        let mut chosen = None;
-        while let Some(frame) = app.stream_ui.frame_buffer.pop_front() {
-            chosen = Some(frame);
-        }
-        chosen
-    };
-
-    let Some(frame) = chosen else {
-        return;
-    };
-    let image = egui::ColorImage::from_rgba_unmultiplied(frame.size, &frame.rgba);
-    match app.stream_ui.texture.as_mut() {
-        Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
-        None => {
-            app.stream_ui.texture =
-                Some(ctx.load_texture("stream_preview", image, egui::TextureOptions::LINEAR));
-        }
-    }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        render_deck_preview(ui, deck_a, egui::vec2(deck_w, deck_h));
+        ui.add_space(gap);
+        // 中央カラム: 小マスタープレビュー＋直下フェーダーを縦に並べ、縦中央へ配置。
+        ui.allocate_ui_with_layout(
+            egui::vec2(master_w, deck_h),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add_space(top_pad);
+                render_master_preview(ui, deck_a, deck_b, *fader, egui::vec2(master_w, master_h));
+                ui.add_space(6.0);
+                render_master_fader(ui, fader);
+            },
+        );
+        ui.add_space(gap);
+        render_deck_preview(ui, deck_b, egui::vec2(deck_w, deck_h));
+    });
 }
 
-fn render_preview(ui: &mut egui::Ui, app: &DownloaderApp) {
-    let width = ui.available_width();
-    let height = width * PREVIEW_HEIGHT as f32 / PREVIEW_WIDTH as f32;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+// コントロール行。プレビューと同じ3分割で A操作UI ｜ （中央は空き） ｜ B操作UI を並べ、
+// 各セル幅がプレビュー幅と一致するため、再生ボタンの中央寄せ・読み込みボタンの右端揃えが
+// それぞれのプレビューに合う。
+fn render_controls_row(
+    ui: &mut egui::Ui,
+    deck_a: &mut StreamDeck,
+    deck_b: &mut StreamDeck,
+    cookie_args: &[String],
+    deck_w: f32,
+    master_w: f32,
+    gap: f32,
+) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.vertical(|ui| {
+            ui.set_width(deck_w);
+            render_deck_controls(ui, deck_a, cookie_args);
+        });
+        // 中央（マスター幅）は空け、左右の操作UIをプレビュー直下に揃える。
+        ui.add_space(gap + master_w + gap);
+        ui.vertical(|ui| {
+            ui.set_width(deck_w);
+            render_deck_controls(ui, deck_b, cookie_args);
+        });
+    });
+}
+
+// 1 デッキ分のプレビュー（映像 or プレースホルダ）を描画する。
+fn render_deck_preview(ui: &mut egui::Ui, deck: &StreamDeck, size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let rounding = egui::CornerRadius::same(12);
     ui.painter().rect_filled(rect, rounding, egui::Color32::BLACK);
 
-    if let Some(texture) = app.stream_ui.texture.as_ref() {
+    if let Some(texture) = deck.texture.as_ref() {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         ui.painter()
             .image(texture.id(), rect, uv, egui::Color32::WHITE);
     } else {
-        let message = if app.stream_ui.running {
-            "読み込み中..."
-        } else {
-            "停止中"
-        };
+        let message = if deck.running { "読み込み中..." } else { "停止中" };
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -435,13 +540,185 @@ fn render_preview(ui: &mut egui::Ui, app: &DownloaderApp) {
             egui::Color32::from_rgb(120, 130, 150),
         );
     }
+
+    // 左上にデッキ識別ラベル（A / B）を重ねる。
+    draw_corner_badge(ui.painter(), rect, deck.label);
+}
+
+// マスタープレビュー。A を不透明で描画し、B をフェーダー値の不透明度で重ねて
+// 線形クロスフェード（左端=A, 右端=B）を表示する。
+fn render_master_preview(
+    ui: &mut egui::Ui,
+    deck_a: &StreamDeck,
+    deck_b: &StreamDeck,
+    fader: f32,
+    size: egui::Vec2,
+) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let rounding = egui::CornerRadius::same(10);
+    let painter = ui.painter();
+    painter.rect_filled(rect, rounding, egui::Color32::BLACK);
+
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    // 下地: A を不透明で描画。
+    if let Some(texture) = deck_a.texture.as_ref() {
+        painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+    }
+    // 上に B をフェーダー不透明度で合成。alpha=f なので結果は A*(1-f)+B*f。
+    if let Some(texture) = deck_b.texture.as_ref() {
+        let alpha = (fader.clamp(0.0, 1.0) * 255.0).round() as u8;
+        painter.image(texture.id(), rect, uv, egui::Color32::from_white_alpha(alpha));
+    }
+
+    // 枠線でマスター出力であることを示す。
+    painter.rect_stroke(
+        rect,
+        rounding,
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(56, 189, 248)),
+        egui::StrokeKind::Inside,
+    );
+    draw_corner_badge(painter, rect, "MASTER");
+}
+
+// プレビュー左上の小さなラベルバッジを描く。
+fn draw_corner_badge(painter: &egui::Painter, rect: egui::Rect, text: &str) {
+    let pos = rect.left_top() + egui::vec2(6.0, 6.0);
+    let galley = painter.layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(11.0),
+        egui::Color32::from_rgb(226, 234, 248),
+    );
+    let bg = egui::Rect::from_min_size(pos, galley.size() + egui::vec2(10.0, 4.0));
+    painter.rect_filled(
+        bg,
+        egui::CornerRadius::same(5),
+        egui::Color32::from_rgba_unmultiplied(8, 14, 24, 170),
+    );
+    painter.galley(pos + egui::vec2(5.0, 2.0), galley, egui::Color32::WHITE);
+}
+
+// マスタークロスフェーダー（左端=A, 右端=B）。
+fn render_master_fader(ui: &mut egui::Ui, fader: &mut f32) {
+    let height = 22.0;
+    let width = ui.available_width();
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+
+    if response.dragged() || response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            *fader = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        }
+        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+    } else if response.hovered() {
+        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+    }
+
+    let track_y = rect.center().y;
+    let track_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, track_y),
+        egui::vec2(rect.width(), 6.0),
+    );
+    let rounding = egui::CornerRadius::same(3);
+    ui.painter().rect_filled(
+        track_rect,
+        rounding,
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 31),
+    );
+
+    // 中央の基準（センター）マーク。
+    ui.painter().rect_filled(
+        egui::Rect::from_center_size(egui::pos2(track_rect.center().x, track_y), egui::vec2(2.0, 12.0)),
+        egui::CornerRadius::same(1),
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 60),
+    );
+
+    // ハンドルは縦長の長方形。
+    let handle_x = track_rect.left() + track_rect.width() * fader.clamp(0.0, 1.0);
+    let handle_rect = egui::Rect::from_center_size(
+        egui::pos2(handle_x, track_y),
+        egui::vec2(6.0, height),
+    );
+    ui.painter().rect_filled(
+        handle_rect,
+        egui::CornerRadius::same(2),
+        egui::Color32::from_rgb(125, 211, 252),
+    );
+}
+
+// 1 デッキ分のフル操作UI（トランスポート＋読み込み＋シークバー＋時間＋エラー）。
+fn render_deck_controls(ui: &mut egui::Ui, deck: &mut StreamDeck, cookie_args: &[String]) {
+    render_deck_transport(ui, deck, cookie_args);
+    ui.add_space(6.0);
+    render_deck_seek_bar(ui, deck);
+
+    if let Some(err) = &deck.error {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(err)
+                .size(11.5)
+                .color(egui::Color32::from_rgb(248, 113, 113)),
+        );
+    }
+}
+
+// 巻き戻し/再生・一時停止/早送り＋右端に読み込み(Enter)ボタン。
+fn render_deck_transport(ui: &mut egui::Ui, deck: &mut StreamDeck, cookie_args: &[String]) {
+    let button_size = egui::vec2(48.0, 36.0);
+    let enter_size = egui::vec2(44.0, 36.0);
+    let gap = 8.0;
+    let content_width = button_size.x * 3.0 + gap * 2.0;
+    let total_width = ui.available_width();
+    let leading = ((total_width - content_width) * 0.5).max(0.0);
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(leading);
+        if icon_button(ui, TransportIcon::Rewind, button_size).clicked() {
+            deck.seek_relative(-0.5);
+        }
+        ui.add_space(gap);
+        let play_icon = if deck.is_active() {
+            TransportIcon::Pause
+        } else {
+            TransportIcon::Play
+        };
+        if icon_button(ui, play_icon, button_size).clicked() {
+            deck.toggle_pause();
+        }
+        ui.add_space(gap);
+        if icon_button(ui, TransportIcon::Forward, button_size).clicked() {
+            deck.seek_relative(0.5);
+        }
+
+        // 残りの領域を使って Enter（読み込み）ボタンを右端へ揃える。
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if icon_button(ui, TransportIcon::Enter, enter_size).clicked() {
+                deck.start_stream(cookie_args.to_vec());
+            }
+        });
+    });
 }
 
 // ドラッグでシーク可能なシークバーと時間表示を描画する。
-fn render_seek_bar(ui: &mut egui::Ui, app: &mut DownloaderApp) {
-    let position = app.stream_ui.current_position();
-    let duration = app.stream_ui.duration;
-    let seekable = app.stream_ui.running && !app.stream_ui.media_urls.is_empty() && duration.is_some();
+fn render_deck_seek_bar(ui: &mut egui::Ui, deck: &mut StreamDeck) {
+    let position = deck.current_position();
+    let duration = deck.duration;
+    let seekable = deck.running && !deck.media_urls.is_empty() && duration.is_some();
+
+    // 時間表示をシークバーの上に配置する。総時間が確定するまではプレースホルダ。
+    let label_position = deck.scrubbing.unwrap_or(position);
+    let time_label = match duration {
+        Some(dur) if deck.running => {
+            format!("{} / {}", format_time(label_position), format_time(dur))
+        }
+        _ => "--:-- / --:--".to_string(),
+    };
+    ui.label(
+        egui::RichText::new(time_label)
+            .size(11.5)
+            .color(egui::Color32::from_rgb(170, 180, 200)),
+    );
+    ui.add_space(4.0);
 
     let bar_height = 16.0;
     let width = ui.available_width();
@@ -458,16 +735,16 @@ fn render_seek_bar(ui: &mut egui::Ui, app: &mut DownloaderApp) {
             if (response.dragged() || response.clicked()) && dur > 0.0 {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let fraction = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                    app.stream_ui.scrubbing = Some(fraction as f64 * dur);
+                    deck.scrubbing = Some(fraction as f64 * dur);
                 }
             }
             if response.drag_stopped() || response.clicked() {
-                commit_target = app.stream_ui.scrubbing.take();
+                commit_target = deck.scrubbing.take();
             }
         }
     }
 
-    let display_position = app.stream_ui.scrubbing.unwrap_or(position);
+    let display_position = deck.scrubbing.unwrap_or(position);
     let fraction = match duration {
         Some(dur) if dur > 0.0 => (display_position / dur).clamp(0.0, 1.0) as f32,
         _ => 0.0,
@@ -507,61 +784,8 @@ fn render_seek_bar(ui: &mut egui::Ui, app: &mut DownloaderApp) {
     }
 
     if let Some(target) = commit_target {
-        app.stream_ui.seek(target);
+        deck.seek(target);
     }
-
-    ui.add_space(4.0);
-    // 総時間が確定するまで（停止中・読み込み中）は現在位置・総時間ともにプレースホルダ表示にする。
-    let time_label = match duration {
-        Some(dur) if app.stream_ui.running => {
-            format!("{} / {}", format_time(display_position), format_time(dur))
-        }
-        _ => "--:-- / --:--".to_string(),
-    };
-    ui.label(
-        egui::RichText::new(time_label)
-            .size(11.5)
-            .color(egui::Color32::from_rgb(170, 180, 200)),
-    );
-}
-
-// 再生/巻き戻し/早送りのアイコンボタン行をプレビュー直下に表示する。
-// ストリーム開始/置換（Enter マーク）ボタンは同じ行の右端に配置する。
-fn render_transport(ui: &mut egui::Ui, app: &mut DownloaderApp) {
-    let button_size = egui::vec2(56.0, 40.0);
-    let enter_size = egui::vec2(48.0, 40.0);
-    let gap = 12.0;
-    let content_width = button_size.x * 3.0 + gap * 2.0;
-    let total_width = ui.available_width();
-    let leading = ((total_width - content_width) * 0.5).max(0.0);
-
-    ui.horizontal(|ui| {
-        ui.add_space(leading);
-        if icon_button(ui, TransportIcon::Rewind, button_size).clicked() {
-            app.stream_ui.seek_relative(-0.5);
-        }
-        ui.add_space(gap);
-        let play_icon = if app.stream_ui.running && !app.stream_ui.paused {
-            TransportIcon::Pause
-        } else {
-            TransportIcon::Play
-        };
-        if icon_button(ui, play_icon, button_size).clicked() {
-            app.stream_ui.toggle_pause();
-        }
-        ui.add_space(gap);
-        if icon_button(ui, TransportIcon::Forward, button_size).clicked() {
-            app.stream_ui.seek_relative(0.5);
-        }
-
-        // 残りの領域を使って Enter ボタンを内容領域の右端へ揃える（右寄せレイアウト）。
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icon_button(ui, TransportIcon::Enter, enter_size).clicked() {
-                let cookie_args = app.settings_ui.cookie_args();
-                app.stream_ui.start_stream(cookie_args);
-            }
-        });
-    });
 }
 
 enum TransportIcon {
