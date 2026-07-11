@@ -700,6 +700,7 @@ struct AnimeThemesVideoCandidate {
     link: String,
     resolution: i64,
     source_priority: i64,
+    tags: Option<String>,
 }
 
 fn extract_animethemes_webm_from_json_api(value: &Value, theme_slug: &str) -> Option<String> {
@@ -736,7 +737,7 @@ fn extract_animethemes_webm_from_json_api(value: &Value, theme_slug: &str) -> Op
         }
     }
 
-    pick_best_video_link(candidates)
+    pick_video_link_for_page(candidates, theme_slug)
 }
 
 fn extract_animethemes_webm_from_nested_payload(value: &Value, theme_slug: &str) -> Option<String> {
@@ -769,7 +770,7 @@ fn extract_animethemes_webm_from_nested_payload(value: &Value, theme_slug: &str)
         }
     }
 
-    pick_best_video_link(candidates)
+    pick_video_link_for_page(candidates, theme_slug)
 }
 
 fn collect_themes_from_anime_node<'a>(node: &'a Value, out: &mut Vec<&'a Value>) {
@@ -848,11 +849,16 @@ fn parse_video_candidate(video: &Value) -> Option<AnimeThemesVideoCandidate> {
         .get("source")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let tags = attributes
+        .get("tags")
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     Some(AnimeThemesVideoCandidate {
         link,
         resolution,
         source_priority: source_priority(source),
+        tags,
     })
 }
 
@@ -870,6 +876,34 @@ fn pick_best_video_link(candidates: Vec<AnimeThemesVideoCandidate>) -> Option<St
         .into_iter()
         .max_by_key(|candidate| (candidate.resolution, candidate.source_priority))
         .map(|candidate| candidate.link)
+}
+
+// ページURLの末尾（例: ED1-NCBD1080）には、テーマ名と動画タグが含まれる。
+// URL直コピー時に別バージョンを選ばないよう、タグ指定があれば完全一致を必須にする。
+fn pick_video_link_for_page(
+    candidates: Vec<AnimeThemesVideoCandidate>,
+    page_theme_slug: &str,
+) -> Option<String> {
+    let requested_tags = page_theme_slug
+        .rsplit_once('-')
+        .map(|(_, tags)| tags)
+        .filter(|tags| !tags.is_empty());
+
+    match requested_tags {
+        Some(requested_tags) => pick_best_video_link(
+            candidates
+                .into_iter()
+                .filter(|candidate| {
+                    candidate
+                        .tags
+                        .as_deref()
+                        .map(|tags| tags.eq_ignore_ascii_case(requested_tags))
+                        .unwrap_or(false)
+                })
+                .collect(),
+        ),
+        None => pick_best_video_link(candidates),
+    }
 }
 
 fn theme_matches_slug(theme: &Value, theme_slug: &str) -> bool {
@@ -1106,6 +1140,73 @@ mod tests {
             actual.as_deref(),
             Some("https://v.animethemes.moe/MeitanteiPrecure-OP1-1080.webm")
         );
+    }
+
+    #[test]
+    fn selects_video_matching_tags_copied_from_page_url() {
+        let json = r#"{
+            "anime": {
+                "animethemes": [
+                    {
+                        "slug": "ED1",
+                        "animethemeentries": [
+                            {
+                                "videos": [
+                                    {
+                                        "link": "https://v.animethemes.moe/Free-ED1-NCBD1080.webm",
+                                        "resolution": 1080,
+                                        "source": "BD",
+                                        "tags": "NCBD1080"
+                                    },
+                                    {
+                                        "link": "https://v.animethemes.moe/Free-ED1.webm",
+                                        "resolution": 1080,
+                                        "source": "BD",
+                                        "tags": "BD1080"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let actual = extract_animethemes_webm_from_api_json(json, "ED1-NCBD1080")
+            .expect("api json should parse");
+        assert_eq!(
+            actual.as_deref(),
+            Some("https://v.animethemes.moe/Free-ED1-NCBD1080.webm")
+        );
+    }
+
+    #[test]
+    fn does_not_guess_another_video_when_requested_tags_are_missing() {
+        let json = r#"{
+            "anime": {
+                "animethemes": [
+                    {
+                        "slug": "ED1",
+                        "animethemeentries": [
+                            {
+                                "videos": [
+                                    {
+                                        "link": "https://v.animethemes.moe/Free-ED1.webm",
+                                        "resolution": 1080,
+                                        "source": "BD",
+                                        "tags": "BD1080"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let actual = extract_animethemes_webm_from_api_json(json, "ED1-NCBD1080")
+            .expect("api json should parse");
+        assert!(actual.is_none());
     }
 
     #[test]
