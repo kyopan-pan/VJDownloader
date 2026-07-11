@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
 
-use super::normalize::{epoch_millis, is_mp4_path, path_to_key};
+use super::normalize::{epoch_millis, is_supported_video_path, path_to_key};
 use super::scanner::{
     build_record_from_path, find_root_id_for_path, trigger_reindex_all_from_db, upsert_directory,
 };
@@ -165,7 +165,7 @@ fn flush_pending_changes(
                 continue;
             }
 
-            if !is_mp4_path(&path) {
+            if !is_supported_video_path(&path) {
                 continue;
             }
 
@@ -264,7 +264,7 @@ pub(super) fn apply_upsert_change(
         return upsert_directory(new_path, roots, write_tx);
     }
 
-    if !is_mp4_path(new_path) {
+    if !is_supported_video_path(new_path) {
         return Ok(());
     }
 

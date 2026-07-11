@@ -6,7 +6,7 @@ use walkdir::WalkDir;
 
 use super::db::open_connection;
 use super::normalize::{
-    epoch_millis, epoch_secs, is_mp4_path, normalize_for_search, path_to_key,
+    epoch_millis, epoch_secs, is_supported_video_path, normalize_for_search, path_to_key,
     system_time_to_epoch_secs,
 };
 use super::{EngineResult, FileRecord, UPSERT_BATCH_SIZE, WatchedRoot, WriteCommand};
@@ -74,7 +74,7 @@ pub(super) fn find_root_id_for_path(path: &Path, roots: &[WatchedRoot]) -> Optio
     best_match.map(|(_, root_id)| root_id)
 }
 
-// 指定ルートを全走査して MP4 を再インデックスする。
+// 指定ルートを全走査して対応動画を再インデックスする。
 pub(super) fn scan_root(
     root_id: i64,
     root_path: &Path,
@@ -93,7 +93,7 @@ pub(super) fn scan_root(
         }
 
         let path = entry.path();
-        if !is_mp4_path(path) {
+        if !is_supported_video_path(path) {
             continue;
         }
 
@@ -117,7 +117,7 @@ pub(super) fn scan_root(
     Ok(())
 }
 
-// ディレクトリ配下の MP4 を差分反映用に走査して upsert する。
+// ディレクトリ配下の対応動画を差分反映用に走査して upsert する。
 pub(super) fn upsert_directory(
     dir: &Path,
     roots: &[WatchedRoot],
@@ -131,7 +131,7 @@ pub(super) fn upsert_directory(
             continue;
         }
         let path = entry.path();
-        if !is_mp4_path(path) {
+        if !is_supported_video_path(path) {
             continue;
         }
 

@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 use url::Url;
 
 use super::process::{run_pipe_to_ffmpeg_or_cancel, spawn_stream_thread, terminate_child_process};
@@ -14,6 +15,13 @@ use super::{CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressContext, Pro
 const ANIMETHEMES_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const ANIMETHEMES_API_ENDPOINT: &str = "https://api.animethemes.moe";
 const ANIMETHEMES_HTML_RANGE: &str = "0-262143";
+
+enum HttpStreamEvent {
+    Started(Option<u64>),
+    Chunk(Vec<u8>),
+    Finished,
+    Failed(String),
+}
 
 // AnimeThemes URL の場合に、直リンク優先で MP4 を生成する専用パイプラインを実行する。
 pub(super) fn run_animethemes_pipeline(
@@ -136,7 +144,75 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
     let _ = tx.send(DownloadEvent::Log(
         "動画ダウンロードと変換を同時に開始します。".to_string(),
     ));
-    let total_bytes = fetch_content_length(webm_url);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .user_agent(ANIMETHEMES_USER_AGENT)
+        .build()
+        .map_err(|err| format!("HTTPクライアントの初期化に失敗しました: {err}"))?;
+    let (http_tx, http_rx) = mpsc::sync_channel(2);
+    let webm_url = webm_url.to_string();
+    thread::spawn(move || {
+        let result = client
+            .get(&webm_url)
+            .send()
+            .map_err(|err| format!("動画のダウンロード開始に失敗しました: {err}"))
+            .and_then(|response| {
+                response
+                    .error_for_status()
+                    .map_err(|err| format!("動画サーバーがエラーを返しました: {err}"))
+            });
+        let mut response = match result {
+            Ok(response) => response,
+            Err(err) => {
+                let _ = http_tx.send(HttpStreamEvent::Failed(err));
+                return;
+            }
+        };
+        if http_tx
+            .send(HttpStreamEvent::Started(response.content_length()))
+            .is_err()
+        {
+            return;
+        }
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            match response.read(&mut buf) {
+                Ok(0) => {
+                    let _ = http_tx.send(HttpStreamEvent::Finished);
+                    return;
+                }
+                Ok(read) => {
+                    if http_tx
+                        .send(HttpStreamEvent::Chunk(buf[..read].to_vec()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = http_tx.send(HttpStreamEvent::Failed(format!(
+                        "動画ストリームの読み取りに失敗しました: {err}"
+                    )));
+                    return;
+                }
+            }
+        }
+    });
+
+    let total_bytes = loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(CANCELLED_ERROR.to_string());
+        }
+        match http_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(HttpStreamEvent::Started(total)) => break total,
+            Ok(HttpStreamEvent::Failed(err)) => return Err(err),
+            Ok(_) => return Err("動画サーバーから不正な応答を受信しました。".to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("動画のダウンロード接続が切断されました。".to_string());
+            }
+        }
+    };
     if let Some(total) = total_bytes {
         let _ = tx.send(DownloadEvent::Log(format!(
             "動画サイズを確認しました: {:.1}MB",
@@ -147,35 +223,6 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
             "動画サイズを取得できなかったため、MBベースで進捗ログを表示します。".to_string(),
         ));
     }
-
-    let mut curl_cmd = Command::new("curl");
-    curl_cmd
-        .arg("-sS")
-        .arg("-L")
-        .arg("-m")
-        .arg("120")
-        .arg("--fail")
-        .arg("-o")
-        .arg("-")
-        .arg("-A")
-        .arg(ANIMETHEMES_USER_AGENT)
-        .arg(webm_url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut curl_child = curl_cmd
-        .spawn()
-        .map_err(|err| format!("curl起動に失敗しました: {err}"))?;
-    tracker.register(&curl_child);
-    spawn_stream_thread(curl_child.stderr.take(), tx, progress);
-
-    let mut curl_stdout = match curl_child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            terminate_child_process(&mut curl_child);
-            return Err("curl出力の取得に失敗しました。".to_string());
-        }
-    };
 
     let _ = tx.send(DownloadEvent::Log(
         "ffmpeg(GPU: h264_videotoolbox)でストリーミング変換を開始します。".to_string(),
@@ -223,7 +270,6 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
     let mut ffmpeg_stdin = match ffmpeg_child.stdin.take() {
         Some(stdin) => stdin,
         None => {
-            terminate_child_process(&mut curl_child);
             terminate_child_process(&mut ffmpeg_child);
             let _ = fs::remove_file(output_path);
             return Err("ffmpeg入力パイプの取得に失敗しました。".to_string());
@@ -233,35 +279,36 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
     let mut downloaded: u64 = 0;
     let mut last_log_bucket: i64 = -1;
     let mut last_bytes_log: u64 = 0;
-    let mut buf = [0u8; 64 * 1024];
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
-            terminate_child_process(&mut curl_child);
             terminate_child_process(&mut ffmpeg_child);
             let _ = fs::remove_file(output_path);
             return Err(CANCELLED_ERROR.to_string());
         }
 
-        let read = match curl_stdout.read(&mut buf) {
-            Ok(read) => read,
-            Err(err) => {
-                terminate_child_process(&mut curl_child);
+        let chunk = match http_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(HttpStreamEvent::Chunk(chunk)) => chunk,
+            Ok(HttpStreamEvent::Finished) => break,
+            Ok(HttpStreamEvent::Failed(err)) => {
                 terminate_child_process(&mut ffmpeg_child);
                 let _ = fs::remove_file(output_path);
-                return Err(format!("動画ストリームの読み取りに失敗しました: {err}"));
+                return Err(err);
+            }
+            Ok(HttpStreamEvent::Started(_)) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                terminate_child_process(&mut ffmpeg_child);
+                let _ = fs::remove_file(output_path);
+                return Err("動画のダウンロード接続が切断されました。".to_string());
             }
         };
-        if read == 0 {
-            break;
-        }
-        if let Err(err) = ffmpeg_stdin.write_all(&buf[..read]) {
-            terminate_child_process(&mut curl_child);
+        if let Err(err) = ffmpeg_stdin.write_all(&chunk) {
             terminate_child_process(&mut ffmpeg_child);
             let _ = fs::remove_file(output_path);
             return Err(format!("ffmpeg入力への書き込みに失敗しました: {err}"));
         }
 
-        downloaded += read as u64;
+        downloaded += chunk.len() as u64;
         if let Some(total) = total_bytes {
             if total > 0 {
                 progress.mark_progress_started();
@@ -289,21 +336,11 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
     }
     drop(ffmpeg_stdin);
 
-    let curl_status = curl_child
-        .wait()
-        .map_err(|err| format!("curlの終了待ちに失敗しました: {err}"))?;
-
     if cancel_flag.load(Ordering::Relaxed) {
         terminate_child_process(&mut ffmpeg_child);
         let _ = fs::remove_file(output_path);
         return Err(CANCELLED_ERROR.to_string());
     }
-    if !curl_status.success() {
-        terminate_child_process(&mut ffmpeg_child);
-        let _ = fs::remove_file(output_path);
-        return Err(format!("curlが異常終了しました: {curl_status}"));
-    }
-
     progress.mark_progress_started();
     let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::downloading(
         100.0,
@@ -438,76 +475,6 @@ fn parse_hhmmss_to_seconds(value: &str) -> Option<f64> {
         return None;
     }
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
-}
-
-// HEAD/Range の順で Content-Length を取得し、進捗計算に使う。
-fn fetch_content_length(url: &str) -> Option<u64> {
-    let head_output = Command::new("curl")
-        .arg("-sIL")
-        .arg("-m")
-        .arg("8")
-        .arg("-A")
-        .arg(ANIMETHEMES_USER_AGENT)
-        .arg(url)
-        .output()
-        .ok()?;
-    if head_output.status.success() {
-        let headers = String::from_utf8_lossy(&head_output.stdout);
-        if let Some(len) = parse_content_length_from_headers(&headers) {
-            return Some(len);
-        }
-    }
-
-    let range_output = Command::new("curl")
-        .arg("-sSL")
-        .arg("-m")
-        .arg("10")
-        .arg("-A")
-        .arg(ANIMETHEMES_USER_AGENT)
-        .arg("-r")
-        .arg("0-0")
-        .arg("-D")
-        .arg("-")
-        .arg("-o")
-        .arg("/dev/null")
-        .arg(url)
-        .output()
-        .ok()?;
-    if !range_output.status.success() {
-        return None;
-    }
-    let headers = String::from_utf8_lossy(&range_output.stdout);
-    parse_content_range_total(&headers).or_else(|| parse_content_length_from_headers(&headers))
-}
-
-fn parse_content_length_from_headers(headers: &str) -> Option<u64> {
-    let mut result = None;
-    for line in headers.lines() {
-        let trimmed = line.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(value) = lower.strip_prefix("content-length:") {
-            if let Ok(len) = value.trim().parse::<u64>() {
-                result = Some(len);
-            }
-        }
-    }
-    result
-}
-
-fn parse_content_range_total(headers: &str) -> Option<u64> {
-    let mut result = None;
-    for line in headers.lines() {
-        let trimmed = line.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(value) = lower.strip_prefix("content-range:") {
-            if let Some((_, total_part)) = value.rsplit_once('/') {
-                if let Ok(total) = total_part.trim().parse::<u64>() {
-                    result = Some(total);
-                }
-            }
-        }
-    }
-    result
 }
 
 // Apple Silicon + h264_videotoolbox 前提を満たしているかを検証する。
@@ -1059,10 +1026,7 @@ fn sanitize_filename_component(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        extract_animethemes_webm_from_api_json, parse_content_length_from_headers,
-        parse_content_range_total,
-    };
+    use super::extract_animethemes_webm_from_api_json;
 
     #[test]
     fn extracts_webm_from_json_api_included_response() {
@@ -1272,17 +1236,5 @@ mod tests {
         let actual =
             extract_animethemes_webm_from_api_json(json, "OP1").expect("api json should parse");
         assert!(actual.is_none());
-    }
-
-    #[test]
-    fn parses_total_size_from_content_range() {
-        let headers = "HTTP/2 206\r\nContent-Range: bytes 0-0/48937934\r\nContent-Length: 1\r\n";
-        assert_eq!(parse_content_range_total(headers), Some(48_937_934));
-    }
-
-    #[test]
-    fn parses_content_length_normally() {
-        let headers = "HTTP/2 200\r\nContent-Length: 75350559\r\n";
-        assert_eq!(parse_content_length_from_headers(headers), Some(75_350_559));
     }
 }

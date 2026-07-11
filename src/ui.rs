@@ -26,8 +26,8 @@ pub fn render(
     let max_download_width = (available_width * DOWNLOAD_PANEL_MAX_RATIO).max(1.0);
     let min_download_width = PANEL_MIN_WIDTH.min(max_download_width);
     let saved_total_width = (app.download_panel_width + app.search_panel_width).max(1.0);
-    let saved_download_ratio = (app.download_panel_width / saved_total_width)
-        .clamp(0.0, DOWNLOAD_PANEL_MAX_RATIO);
+    let saved_download_ratio =
+        (app.download_panel_width / saved_total_width).clamp(0.0, DOWNLOAD_PANEL_MAX_RATIO);
     let default_download_width =
         (available_width * saved_download_ratio).clamp(min_download_width, max_download_width);
 
@@ -439,15 +439,12 @@ fn render_file_row(
         }
         let max_x = remove_rect.left().min(row_rect.right());
         if max_x > row_rect.left() {
-            drag_rect = egui::Rect::from_min_max(row_rect.min, egui::pos2(max_x, row_rect.bottom()));
+            drag_rect =
+                egui::Rect::from_min_max(row_rect.min, egui::pos2(max_x, row_rect.bottom()));
         }
     }
 
-    let drag_response = pointing(ui.interact(
-        drag_rect,
-        drag_id,
-        egui::Sense::click_and_drag(),
-    ));
+    let drag_response = pointing(ui.interact(drag_rect, drag_id, egui::Sense::click_and_drag()));
     if drag_response.drag_started_by(egui::PointerButton::Primary) {
         app.start_native_drag(frame, drag_path);
     }
