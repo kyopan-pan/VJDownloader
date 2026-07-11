@@ -13,16 +13,17 @@ pub fn render(
     // UI全体の状態とアクションの入口
     app: &mut DownloaderApp,
     // 描画・入力を統括するeguiコンテキスト
-    ctx: &egui::Context,
+    root_ui: &mut egui::Ui,
     // ウィンドウ/フレーム操作に使うハンドル
     frame: &eframe::Frame,
 ) {
-    settings_ui::render_toolbar(app, ctx);
+    let ctx = root_ui.ctx().clone();
+    settings_ui::render_toolbar(app, &ctx);
     let panel_bg = egui::Color32::from_rgb(15, 23, 42);
     let panel_frame = egui::Frame::NONE
         .fill(panel_bg)
         .inner_margin(egui::Margin::symmetric(16, 16));
-    let available_width = ctx.available_rect().width().max(1.0);
+    let available_width = root_ui.available_width().max(1.0);
     let max_download_width = (available_width * DOWNLOAD_PANEL_MAX_RATIO).max(1.0);
     let min_download_width = PANEL_MIN_WIDTH.min(max_download_width);
     let saved_total_width = (app.download_panel_width + app.search_panel_width).max(1.0);
@@ -31,25 +32,25 @@ pub fn render(
     let default_download_width =
         (available_width * saved_download_ratio).clamp(min_download_width, max_download_width);
 
-    let download_panel = egui::SidePanel::left("download_section")
+    let download_panel = egui::Panel::left("download_section")
         .resizable(true)
-        .default_width(default_download_width)
-        .width_range(min_download_width..=max_download_width)
+        .default_size(default_download_width)
+        .size_range(min_download_width..=max_download_width)
         .frame(panel_frame.clone())
-        .show(ctx, |ui| {
-            render_download_section(ui, ctx, app, frame);
+        .show(root_ui, |ui| {
+            render_download_section(ui, &ctx, app, frame);
         });
 
     let search_panel = egui::CentralPanel::default()
         .frame(panel_frame)
-        .show(ctx, |ui| {
-            render_search_section(ui, ctx, app, frame);
+        .show(root_ui, |ui| {
+            render_search_section(ui, &ctx, app, frame);
         });
     app.download_panel_width = download_panel.response.rect.width().max(1.0);
     app.search_panel_width = search_panel.response.rect.width().max(1.0);
 
-    settings_ui::render_windows(app, ctx);
-    log_ui::render_log_viewport(app, ctx);
+    settings_ui::render_windows(app, &ctx);
+    log_ui::render_log_viewport(app, &ctx);
 }
 
 fn render_download_section(
@@ -206,7 +207,7 @@ fn render_search_input(
                 egui::TextEdit::singleline(&mut app.search_query)
                     .hint_text("ファイル名またはメタ情報で検索...")
                     .text_color(egui::Color32::from_rgb(226, 232, 240))
-                    .frame(false),
+                    .frame(egui::Frame::NONE),
             );
             if response.changed() {
                 changed = true;

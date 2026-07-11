@@ -4,7 +4,8 @@ pub fn apply_theme(
     // テーマ適用先のeguiコンテキスト
     ctx: &egui::Context,
 ) {
-    let mut style = (*ctx.style()).clone();
+    ctx.set_theme(egui::Theme::Dark);
+    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.visuals = egui::Visuals::dark();
     style.visuals.window_fill = egui::Color32::from_rgb(12, 18, 32);
     style.visuals.panel_fill = egui::Color32::from_rgb(12, 18, 32);
@@ -26,7 +27,7 @@ pub fn apply_theme(
     style.spacing.button_padding = egui::vec2(14.0, 10.0);
     style.spacing.scroll = egui::style::ScrollStyle::floating();
     style.spacing.scroll.bar_outer_margin = 0.0;
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Dark, style);
 
     let mut fonts = egui::FontDefinitions::default();
     install_fonts(&mut fonts);

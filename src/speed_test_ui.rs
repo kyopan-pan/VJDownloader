@@ -114,7 +114,7 @@ pub fn render_speed_test_viewport(app: &mut DownloaderApp, ctx: &egui::Context) 
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = true;
                 egui::Window::new("通信速度測定")
                     .collapsible(false)
@@ -129,8 +129,9 @@ pub fn render_speed_test_viewport(app: &mut DownloaderApp, ctx: &egui::Context) 
                 }
             }
             _ => {
+                let content_ctx = ctx.clone();
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    render_speed_test_contents(ui, app, ctx);
+                    render_speed_test_contents(ui, app, &content_ctx);
                 });
             }
         }

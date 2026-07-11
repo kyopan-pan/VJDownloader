@@ -296,7 +296,7 @@ fn render_initial_setup_viewport(
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = true;
                 egui::Window::new("初回セットアップ")
                     .collapsible(false)
@@ -347,7 +347,7 @@ fn render_settings_viewport(
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = true;
                 egui::Window::new("設定")
                     .collapsible(false)
