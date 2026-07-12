@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Instant;
+use tempfile::TempDir;
 
 use crate::cursor::pointing;
 use crate::download::{ProcessTracker, read_clipboard_text};
@@ -34,6 +35,10 @@ struct StreamDeck {
     position_instant: Option<Instant>,
     scrubbing: Option<f64>,
     media_urls: Vec<String>,
+    cache_dir: Option<TempDir>,
+    cache_id: u64,
+    cache_cancel_flag: Option<Arc<AtomicBool>>,
+    cache_tracker: Option<ProcessTracker>,
     run_id: u64,
     cancel_flag: Option<Arc<AtomicBool>>,
     tracker: Option<ProcessTracker>,
@@ -63,6 +68,10 @@ impl StreamDeck {
             position_instant: None,
             scrubbing: None,
             media_urls: Vec::new(),
+            cache_dir: None,
+            cache_id: 0,
+            cache_cancel_flag: None,
+            cache_tracker: None,
             run_id: 0,
             cancel_flag: None,
             tracker: None,
@@ -84,6 +93,7 @@ impl StreamDeck {
             return;
         };
 
+        self.cancel_cache();
         self.drain_frames();
         self.running = true;
         self.paused = false;
@@ -94,11 +104,43 @@ impl StreamDeck {
         self.scrubbing = None;
         self.media_urls.clear();
 
+        // 1デッキにつきキャッシュは1ファイルだけ保持する。古い動画のキャッシュは
+        // TempDir の差し替え時に自動削除される。
+        let cache_dir = match tempfile::Builder::new().prefix("vjstream-").tempdir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                self.running = false;
+                self.error = Some(format!("一時キャッシュを作成できませんでした: {err}"));
+                return;
+            }
+        };
+        let cache_path = cache_dir.path().join("video.mp4");
+        self.cache_dir = Some(cache_dir);
+        self.cache_id += 1;
+        let cache_id = self.cache_id;
+        let cache_cancel = Arc::new(AtomicBool::new(false));
+        let cache_tracker = ProcessTracker::new();
+        self.cache_cancel_flag = Some(cache_cancel.clone());
+        self.cache_tracker = Some(cache_tracker.clone());
+
         let (run_id, cancel, tracker) = self.begin_run();
         let tx = self.tx.clone();
         let frame_tx = self.frame_tx.clone();
         thread::spawn(move || {
-            resolve_and_run(url, cookie_args, 0.0, run_id, tx, frame_tx, cancel, tracker);
+            resolve_and_run(
+                url,
+                cookie_args,
+                cache_path,
+                cache_id,
+                cache_cancel,
+                cache_tracker,
+                0.0,
+                run_id,
+                tx,
+                frame_tx,
+                cancel,
+                tracker,
+            );
         });
     }
 
@@ -189,6 +231,7 @@ impl StreamDeck {
         if let Some(tracker) = self.tracker.as_ref() {
             tracker.terminate_all();
         }
+        self.cancel_cache();
         self.cancel_flag = None;
         self.tracker = None;
         self.running = false;
@@ -199,11 +242,25 @@ impl StreamDeck {
         self.position_instant = None;
         self.scrubbing = None;
         self.media_urls.clear();
+        self.cache_dir = None;
         self.drain_frames();
         #[cfg(feature = "syphon")]
         {
             self.last_rgba = None;
         }
+    }
+
+    fn cancel_cache(&mut self) {
+        self.cache_id += 1;
+        if let Some(cancel) = self.cache_cancel_flag.as_ref() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(tracker) = self.cache_tracker.as_ref() {
+            tracker.terminate_all();
+        }
+        self.cache_cancel_flag = None;
+        self.cache_tracker = None;
+        self.cache_dir = None;
     }
 
     // 新しい再生世代を採番し、追跡用のフラグ/トラッカーを差し替える。
@@ -269,15 +326,57 @@ impl StreamDeck {
                     if run_id != self.run_id {
                         continue;
                     }
-                    self.running = false;
-                    self.paused = false;
                     self.cancel_flag = None;
                     self.tracker = None;
-                    self.texture = None;
                     self.position_instant = None;
                     self.drain_frames();
-                    if let Err(err) = result {
-                        self.error = Some(err);
+                    match result {
+                        Ok(()) if !self.media_urls.is_empty() => {
+                            // 現行動画の自然終了時は、解決済みURLを再利用して冒頭から再生する。
+                            // 差し替え・シーク・一時停止で終了した旧世代の通知は上の
+                            // run_id 判定で除外されるため、意図しない再起動は発生しない。
+                            self.position = 0.0;
+                            let urls = self.media_urls.clone();
+                            let (run_id, cancel, tracker) = self.begin_run();
+                            let tx = self.tx.clone();
+                            let frame_tx = self.frame_tx.clone();
+                            thread::spawn(move || {
+                                run_from_urls(urls, 0.0, run_id, tx, frame_tx, cancel, tracker);
+                            });
+                        }
+                        Ok(()) => {
+                            self.running = false;
+                            self.paused = false;
+                            self.texture = None;
+                            self.cache_dir = None;
+                        }
+                        Err(err) => {
+                            self.running = false;
+                            self.paused = false;
+                            self.texture = None;
+                            self.media_urls.clear();
+                            self.cancel_cache();
+                            self.error = Some(err);
+                        }
+                    }
+                }
+                StreamEvent::CacheFinished { cache_id, result } => {
+                    if cache_id != self.cache_id {
+                        continue;
+                    }
+                    self.cache_cancel_flag = None;
+                    self.cache_tracker = None;
+                    match result {
+                        Ok(path) => {
+                            // 現在の初回再生はそのまま継続し、次回のループまたは
+                            // シークから完成済みローカルキャッシュを利用する。
+                            self.media_urls = vec![path.to_string_lossy().into_owned()];
+                        }
+                        Err(err) => {
+                            // ネットワーク再生は継続できるため、キャッシュだけ破棄する。
+                            self.cache_dir = None;
+                            self.error = Some(err);
+                        }
                     }
                 }
             }

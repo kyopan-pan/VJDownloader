@@ -6,7 +6,7 @@ pub mod ui;
 pub mod syphon;
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -57,6 +57,10 @@ pub enum StreamEvent {
         run_id: u64,
         result: Result<(), String>,
     },
+    CacheFinished {
+        cache_id: u64,
+        result: Result<PathBuf, String>,
+    },
 }
 
 // プレビュー表示用にデコードした 1 フレーム（RGBA）。pts は再生開始からの絶対秒。
@@ -69,11 +73,15 @@ pub struct StreamFrame {
 
 // クリップボードURLを解決して再生を開始する（初回再生用）。
 //
-// yt-dlp で総再生時間と直リンク（映像/音声）を取得し、それを cache 用に通知してから
-// ffmpeg を起動する。直リンクを使うため、以後のシークは ffmpeg の再起動だけで済む。
+// yt-dlp で総再生時間と直リンク（映像/音声）を取得し、ffmpeg の初回再生と
+// ローカルキャッシュ作成を並行して開始する。
 pub fn resolve_and_run(
     url: String,
     cookie_args: Vec<String>,
+    cache_path: PathBuf,
+    cache_id: u64,
+    cache_cancel_flag: Arc<AtomicBool>,
+    cache_tracker: ProcessTracker,
     start_offset: f64,
     run_id: u64,
     tx: mpsc::Sender<StreamEvent>,
@@ -98,11 +106,86 @@ pub fn resolve_and_run(
         urls: urls.clone(),
     });
 
+    // 初回再生と並行してローカルキャッシュを作る。キャッシュは再生世代とは
+    // 別の tracker/cancel_flag で管理し、ループ再起動時にも継続させる。
+    let cache_tx = tx.clone();
+    thread::spawn(move || {
+        let result = cache_media(
+            &url,
+            &cookie_args,
+            &cache_path,
+            &cache_cancel_flag,
+            &cache_tracker,
+        )
+        .map(|()| cache_path);
+        let _ = cache_tx.send(StreamEvent::CacheFinished { cache_id, result });
+    });
+
     let result = run_ffmpeg(&urls, start_offset, run_id, &tx, &frame_tx, &cancel_flag, &tracker);
     let _ = tx.send(StreamEvent::Finished { run_id, result });
 }
 
-// 解決済みの直リンクから指定位置で再生を開始する（シーク用）。
+// yt-dlp で動画全体を一時ファイルへ1度だけ保存する。再生・シーク・ループは
+// このローカルファイルを使うため、再生開始後はネットワークへアクセスしない。
+fn cache_media(
+    url: &str,
+    cookie_args: &[String],
+    cache_path: &Path,
+    cancel_flag: &Arc<AtomicBool>,
+    tracker: &ProcessTracker,
+) -> Result<(), String> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("キャッシュ作成がキャンセルされました。".to_string());
+    }
+
+    let yt_dlp = yt_dlp_path();
+    let mut cmd = Command::new(&yt_dlp);
+    cmd.arg("--no-playlist")
+        .args(cookie_args)
+        .args([
+            "--extractor-args",
+            "youtube:player_client=web",
+            "--extractor-args",
+            "youtube:skip=translated_subs",
+        ])
+        .arg("--js-runtimes")
+        .arg(js_runtime_arg())
+        .arg("-f")
+        .arg(FORMAT_SELECTOR)
+        .arg("--merge-output-format")
+        .arg("mp4")
+        .arg("--force-overwrites")
+        .arg("-o")
+        .arg(cache_path)
+        .arg(url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|err| format!("動画キャッシュの開始に失敗しました: {err}"))?;
+    tracker.register(&child);
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("動画キャッシュの終了待ちに失敗しました: {err}"))?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("キャッシュ作成がキャンセルされました。".to_string());
+    }
+    if !output.status.success() {
+        let stderr = sanitize_log_text(&String::from_utf8_lossy(&output.stderr));
+        return Err(if stderr.is_empty() {
+            format!("動画キャッシュに失敗しました: {}", output.status)
+        } else {
+            format!("動画キャッシュに失敗しました: {stderr}")
+        });
+    }
+    if !cache_path.is_file() {
+        return Err("動画キャッシュが作成されませんでした。".to_string());
+    }
+    Ok(())
+}
+
+// 解決済みの直リンクまたは完成済みローカルキャッシュから再生する（シーク/ループ用）。
 pub fn run_from_urls(
     urls: Vec<String>,
     start_offset: f64,
@@ -296,22 +379,21 @@ fn build_ffmpeg_command(ffmpeg: &Path, urls: &[String], start_offset: f64) -> Co
 
     // 各入力URLにHTTP再接続オプションとシーク位置を付与する。
     for url in urls {
-        cmd.arg("-reconnect")
-            .arg("1")
-            .arg("-reconnect_streamed")
-            .arg("1")
-            .arg("-reconnect_delay_max")
-            .arg("5")
-            .arg("-user_agent")
-            .arg(YOUTUBE_USER_AGENT)
-            .arg("-referer")
-            .arg("https://www.youtube.com/")
-            .arg("-headers")
-            .arg(YOUTUBE_INPUT_HEADERS)
-            .arg("-ss")
-            .arg(&offset)
-            .arg("-i")
-            .arg(url);
+        if url.starts_with("http://") || url.starts_with("https://") {
+            cmd.arg("-reconnect")
+                .arg("1")
+                .arg("-reconnect_streamed")
+                .arg("1")
+                .arg("-reconnect_delay_max")
+                .arg("5")
+                .arg("-user_agent")
+                .arg(YOUTUBE_USER_AGENT)
+                .arg("-referer")
+                .arg("https://www.youtube.com/")
+                .arg("-headers")
+                .arg(YOUTUBE_INPUT_HEADERS);
+        }
+        cmd.arg("-ss").arg(&offset).arg("-i").arg(url);
     }
 
     // 音声は2入力構成なら2番目（index 1）、単一入力なら index 0 から取る。
