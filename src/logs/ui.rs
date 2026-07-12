@@ -3,8 +3,11 @@ use std::time::Duration;
 use arboard::Clipboard;
 use eframe::egui;
 
-use crate::app::DownloaderApp;
+use std::sync::{Arc, Mutex};
+
 use crate::cursor::pointing;
+use crate::logs::AppLogger;
+use crate::theme::paint_viewport_background;
 
 pub struct LogUiState {
     pub show_logs: bool,
@@ -27,16 +30,14 @@ impl Default for LogUiState {
 }
 
 pub fn render_log_viewport(
-    // ログウィンドウ表示状態とログ本体を保持するアプリ
-    app: &mut DownloaderApp,
-    // ビューポート描画に使うコンテキスト
+    state: &Arc<Mutex<LogUiState>>,
+    logs: &Arc<Mutex<AppLogger>>,
     ctx: &egui::Context,
 ) {
-    if !app.log_ui.show_logs {
+    if !state.lock().is_ok_and(|state| state.show_logs) {
         return;
     }
 
-    let mut close_requested = false;
     let viewport_id = log_viewport_id();
     let builder = egui::ViewportBuilder::default()
         .with_title("ログ")
@@ -44,44 +45,24 @@ pub fn render_log_viewport(
         .with_min_inner_size(egui::vec2(520.0, 280.0))
         .with_always_on_top();
 
-    ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
-        if ctx.input(|i| i.viewport().close_requested()) {
-            close_requested = true;
-        }
-
-        match class {
-            egui::ViewportClass::EmbeddedWindow => {
-                let mut open = true;
-                egui::Window::new("ログ")
-                    .collapsible(false)
-                    .resizable(true)
-                    .default_width(740.0)
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        render_log_contents(ui, app);
-                    });
-                if !open {
-                    close_requested = true;
-                }
+    let state = Arc::clone(state);
+    let logs = Arc::clone(logs);
+    ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
+        paint_viewport_background(ui);
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            if let Ok(mut state) = state.lock() {
+                state.show_logs = false;
             }
-            _ => {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    render_log_contents(ui, app);
-                });
-            }
+            return;
         }
+        render_log_contents(ui, &logs);
     });
-
-    if close_requested {
-        app.log_ui.show_logs = false;
-    }
 }
 
 fn render_log_contents(
     // ログ画面の描画先
     ui: &mut egui::Ui,
-    // ログ一覧とボタン操作を保持するアプリ
-    app: &mut DownloaderApp,
+    logs: &Arc<Mutex<AppLogger>>,
 ) {
     let mut copy_clicked = false;
     let mut clear_clicked = false;
@@ -116,7 +97,8 @@ fn render_log_contents(
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            if app.status_logs.is_empty() {
+                            let Ok(logs) = logs.lock() else { return };
+                            if logs.is_empty() {
                                 ui.add_space(4.0);
                                 ui.label(
                                     egui::RichText::new("ログはまだありません。")
@@ -126,7 +108,7 @@ fn render_log_contents(
                                 return;
                             }
 
-                            for (index, line) in app.status_logs.lines().enumerate() {
+                            for (index, line) in logs.lines().enumerate() {
                                 let fill = if index % 2 == 1 {
                                     egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6)
                                 } else {
@@ -187,13 +169,18 @@ fn render_log_contents(
         });
 
     if clear_clicked {
-        app.clear_logs();
+        if let Ok(mut logs) = logs.lock() {
+            logs.clear();
+        }
     }
 
     if copy_clicked {
-        let snapshot = app.build_recent_log_snapshot(Duration::from_secs(10 * 60));
+        let snapshot = logs
+            .lock()
+            .map(|logs| logs.build_recent_snapshot(Duration::from_secs(10 * 60)))
+            .unwrap_or_default();
         if let Err(err) = copy_to_clipboard(&snapshot) {
-            app.push_status(format!("ログのコピーに失敗しました: {err}"));
+            eprintln!("ログのコピーに失敗しました: {err}");
         }
     }
 }

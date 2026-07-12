@@ -258,7 +258,9 @@ pub fn render_toolbar(
         app.settings_ui.open_settings();
     }
     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::L)) {
-        app.log_ui.open_logs();
+        if let Ok(mut state) = app.log_ui.lock() {
+            state.open_logs();
+        }
     }
 }
 

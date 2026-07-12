@@ -50,7 +50,7 @@ pub fn render(
     app.search_panel_width = search_panel.response.rect.width().max(1.0);
 
     settings_ui::render_windows(app, &ctx);
-    log_ui::render_log_viewport(app, &ctx);
+    log_ui::render_log_viewport(&app.log_ui, &app.status_logs, &ctx);
 }
 
 fn render_download_section(

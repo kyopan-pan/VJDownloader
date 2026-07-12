@@ -1,5 +1,14 @@
 use eframe::egui;
 
+/// Deferred Viewport のルート領域をテーマのパネル色で塗る。
+///
+/// `show_viewport_deferred` が渡す `Ui` は `CentralPanel` を自動生成しないため、
+/// 明示的に塗らないとネイティブウィンドウのクリアカラーが露出する。
+pub fn paint_viewport_background(ui: &egui::Ui) {
+    ui.painter()
+        .rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
+}
+
 pub fn apply_theme(
     // テーマ適用先のeguiコンテキスト
     ctx: &egui::Context,

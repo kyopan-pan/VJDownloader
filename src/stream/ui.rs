@@ -1,17 +1,19 @@
 use eframe::egui;
+#[cfg(feature = "syphon")]
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Instant;
 
-use crate::app::DownloaderApp;
 use crate::cursor::pointing;
 use crate::download::{ProcessTracker, read_clipboard_text};
 use crate::stream::{
     PREVIEW_FPS, PREVIEW_HEIGHT, PREVIEW_WIDTH, StreamEvent, StreamFrame, resolve_and_run,
     run_from_urls,
 };
+use crate::theme::paint_viewport_background;
 
 // ジッタ吸収用フレームバッファの上限（暴走時の安全弁）。
 // 高解像度(Syphon)時は1フレームが大きいためメモリを抑える。
@@ -348,11 +350,22 @@ pub struct StreamUiState {
     deck_b: StreamDeck,
     // マスタークロスフェード。0.0 = A のみ、1.0 = B のみ。
     fader: f32,
-    // Syphon 出力（マスターを VDMX 等へ常時送信）のサーバ実体。
     #[cfg(feature = "syphon")]
-    syphon: Option<crate::stream::syphon::SyphonPublisher>,
-    #[cfg(feature = "syphon")]
-    syphon_error: Option<String>,
+    syphon_buffer: Vec<u8>,
+}
+
+#[cfg(feature = "syphon")]
+#[derive(Default)]
+struct SyphonUiState {
+    publisher: Option<crate::stream::syphon::SyphonPublisher>,
+    error: Option<String>,
+}
+
+// Metal/Objective-C オブジェクトは Send ではないため、Deferred callback が実行される
+// UI スレッドに固定して保持する。共有 Mutex の中へ入れないことで安全な Send 境界を保つ。
+#[cfg(feature = "syphon")]
+thread_local! {
+    static SYPHON_UI: RefCell<SyphonUiState> = RefCell::new(SyphonUiState::default());
 }
 
 impl StreamUiState {
@@ -363,15 +376,13 @@ impl StreamUiState {
             deck_b: StreamDeck::new("B", "stream_preview_b"),
             fader: 0.0,
             #[cfg(feature = "syphon")]
-            syphon: None,
-            #[cfg(feature = "syphon")]
-            syphon_error: None,
+            syphon_buffer: vec![0; PREVIEW_WIDTH * PREVIEW_HEIGHT * 4],
         }
     }
 
     // マスター（A*(1-f)+B*f）を BGRA8 でCPU合成する。Syphon配信用。
     #[cfg(feature = "syphon")]
-    fn master_bgra(&self) -> Vec<u8> {
+    fn update_master_bgra(&mut self) {
         let w = PREVIEW_WIDTH;
         let h = PREVIEW_HEIGHT;
         let count = w * h;
@@ -379,7 +390,7 @@ impl StreamUiState {
         let inv = 1.0 - f;
         let a = self.deck_a.last_rgba.as_deref();
         let b = self.deck_b.last_rgba.as_deref();
-        let mut out = vec![0u8; count * 4];
+        let out = &mut self.syphon_buffer;
         for i in 0..count {
             let p = i * 4;
             let (ar, ag, ab) = rgb_at(a, p);
@@ -393,22 +404,17 @@ impl StreamUiState {
             out[p + 2] = r;
             out[p + 3] = 255;
         }
-        out
     }
 
     pub fn open_stream(&mut self) {
         self.show_stream = true;
     }
 
-    fn stop_all(&mut self) {
+    pub(crate) fn stop_all(&mut self) {
         self.deck_a.stop();
         self.deck_b.stop();
         #[cfg(feature = "syphon")]
-        {
-            // ウィンドウを閉じている間は Syphon サーバーの公開も停止する。
-            self.syphon = None;
-            self.syphon_error = None;
-        }
+        SYPHON_UI.with(|state| *state.borrow_mut() = SyphonUiState::default());
     }
 
     pub fn poll_updates(&mut self) {
@@ -423,12 +429,15 @@ impl Default for StreamUiState {
     }
 }
 
-pub fn render_stream_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
-    if !app.stream_ui.show_stream {
+pub fn render_stream_viewport(
+    state: &Arc<Mutex<StreamUiState>>,
+    cookie_args: Vec<String>,
+    ctx: &egui::Context,
+) {
+    if !state.lock().is_ok_and(|state| state.show_stream) {
         return;
     }
 
-    let mut close_requested = false;
     let viewport_id = stream_viewport_id();
     let builder = egui::ViewportBuilder::default()
         .with_title("ストリーム再生")
@@ -436,46 +445,27 @@ pub fn render_stream_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
         .with_min_inner_size(egui::vec2(760.0, 540.0))
         .with_always_on_top();
 
-    ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
+    let state = Arc::clone(state);
+    ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
+        paint_viewport_background(ui);
+        let ctx = ui.ctx().clone();
+        let Ok(mut stream) = state.lock() else { return };
+        stream.poll_updates();
         if ctx.input(|i| i.viewport().close_requested()) {
-            close_requested = true;
+            stream.stop_all();
+            stream.show_stream = false;
+            return;
         }
-
-        match class {
-            egui::ViewportClass::EmbeddedWindow => {
-                let mut open = true;
-                egui::Window::new("ストリーム再生")
-                    .collapsible(false)
-                    .resizable(true)
-                    .default_width(900.0)
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        render_stream_contents(ui, app, ctx);
-                    });
-                if !open {
-                    close_requested = true;
-                }
-            }
-            _ => {
-                let content_ctx = ctx.clone();
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    render_stream_contents(ui, app, &content_ctx);
-                });
-            }
-        }
+        render_stream_contents(ui, &mut stream, &cookie_args, &ctx);
     });
-
-    if close_requested {
-        app.stream_ui.stop_all();
-        app.stream_ui.show_stream = false;
-    }
 }
 
-fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui::Context) {
-    // 読み込みに使う cookie 引数を先に取り出して、以後は stream_ui を排他借用する。
-    let cookie_args = app.settings_ui.cookie_args();
-    let stream = &mut app.stream_ui;
-
+fn render_stream_contents(
+    ui: &mut egui::Ui,
+    stream: &mut StreamUiState,
+    cookie_args: &[String],
+    ctx: &egui::Context,
+) {
     egui::Frame::NONE
         .inner_margin(egui::Margin {
             left: 16,
@@ -515,7 +505,7 @@ fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui
                 ui,
                 &mut stream.deck_a,
                 &mut stream.deck_b,
-                &cookie_args,
+                cookie_args,
                 deck_w,
                 master_w,
                 gap,
@@ -524,12 +514,12 @@ fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui
             // Syphon の状態表示とマスター配信（フィーチャー有効時のみ）。
             #[cfg(feature = "syphon")]
             {
-                render_syphon_status(ui, stream);
+                render_syphon_status(ui);
                 publish_master(stream, ctx);
             }
 
             if active {
-                ctx.request_repaint();
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
             }
         });
 }
@@ -545,26 +535,29 @@ fn rgb_at(buf: Option<&[u8]>, p: usize) -> (u8, u8, u8) {
 
 // 常時有効な Syphon 出力の状態表示。
 #[cfg(feature = "syphon")]
-fn render_syphon_status(ui: &mut egui::Ui, stream: &StreamUiState) {
+fn render_syphon_status(ui: &mut egui::Ui) {
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {
-        let status = if let Some(publisher) = stream.syphon.as_ref() {
-            let clients = if publisher.has_clients() {
-                "受信側: 接続あり"
+        let status = SYPHON_UI.with(|state| {
+            let state = state.borrow();
+            if let Some(publisher) = state.publisher.as_ref() {
+                let clients = if publisher.has_clients() {
+                    "受信側: 接続あり"
+                } else {
+                    "受信側: 未接続"
+                };
+                format!(
+                    "配信中: {} / {} / 送信フレーム: {}",
+                    crate::stream::syphon::SyphonPublisher::server_name(),
+                    clients,
+                    publisher.published_frames()
+                )
+            } else if let Some(error) = state.error.as_ref() {
+                format!("初期化失敗: {error}")
             } else {
-                "受信側: 未接続"
-            };
-            format!(
-                "配信中: {} / {} / 送信フレーム: {}",
-                crate::stream::syphon::SyphonPublisher::server_name(),
-                clients,
-                publisher.published_frames()
-            )
-        } else if let Some(error) = stream.syphon_error.as_ref() {
-            format!("初期化失敗: {error}")
-        } else {
-            "初期化待ち…".to_string()
-        };
+                "初期化待ち…".to_string()
+            }
+        });
         ui.label(
             egui::RichText::new(status.as_str())
                 .size(11.0)
@@ -576,22 +569,24 @@ fn render_syphon_status(ui: &mut egui::Ui, stream: &StreamUiState) {
 // マスターを Syphon サーバへ1フレーム配信する。
 #[cfg(feature = "syphon")]
 fn publish_master(stream: &mut StreamUiState, ctx: &egui::Context) {
-    if stream.syphon.is_none() && stream.syphon_error.is_none() {
-        match crate::stream::syphon::SyphonPublisher::new(
-            PREVIEW_WIDTH,
-            PREVIEW_HEIGHT,
-            crate::stream::syphon::SyphonPublisher::server_name(),
-        ) {
-            Ok(publisher) => stream.syphon = Some(publisher),
-            Err(error) => stream.syphon_error = Some(error),
+    stream.update_master_bgra();
+    SYPHON_UI.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.publisher.is_none() && state.error.is_none() {
+            match crate::stream::syphon::SyphonPublisher::new(
+                PREVIEW_WIDTH,
+                PREVIEW_HEIGHT,
+                crate::stream::syphon::SyphonPublisher::server_name(),
+            ) {
+                Ok(publisher) => state.publisher = Some(publisher),
+                Err(error) => state.error = Some(error),
+            }
         }
-    }
-    if let Some(publisher) = stream.syphon.as_ref() {
-        let bgra = stream.master_bgra();
-        let _ = publisher.publish(&bgra);
-        // 連続配信のため再描画を要求する。
-        ctx.request_repaint();
-    }
+        if let Some(publisher) = state.publisher.as_ref() {
+            let _ = publisher.publish(&stream.syphon_buffer);
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+    });
 }
 
 // 上段: A プレビュー / 中央カラム（小マスタープレビュー＋直下にフェーダー） / B プレビュー。
@@ -663,14 +658,19 @@ fn render_controls_row(
 fn render_deck_preview(ui: &mut egui::Ui, deck: &StreamDeck, size: egui::Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let rounding = egui::CornerRadius::same(12);
-    ui.painter().rect_filled(rect, rounding, egui::Color32::BLACK);
+    ui.painter()
+        .rect_filled(rect, rounding, egui::Color32::BLACK);
 
     if let Some(texture) = deck.texture.as_ref() {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         ui.painter()
             .image(texture.id(), rect, uv, egui::Color32::WHITE);
     } else {
-        let message = if deck.running { "読み込み中..." } else { "停止中" };
+        let message = if deck.running {
+            "読み込み中..."
+        } else {
+            "停止中"
+        };
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -706,7 +706,12 @@ fn render_master_preview(
     // 上に B をフェーダー不透明度で合成。alpha=f なので結果は A*(1-f)+B*f。
     if let Some(texture) = deck_b.texture.as_ref() {
         let alpha = (fader.clamp(0.0, 1.0) * 255.0).round() as u8;
-        painter.image(texture.id(), rect, uv, egui::Color32::from_white_alpha(alpha));
+        painter.image(
+            texture.id(),
+            rect,
+            uv,
+            egui::Color32::from_white_alpha(alpha),
+        );
     }
 
     // 枠線でマスター出力であることを示す。
@@ -766,17 +771,18 @@ fn render_master_fader(ui: &mut egui::Ui, fader: &mut f32) {
 
     // 中央の基準（センター）マーク。
     ui.painter().rect_filled(
-        egui::Rect::from_center_size(egui::pos2(track_rect.center().x, track_y), egui::vec2(2.0, 12.0)),
+        egui::Rect::from_center_size(
+            egui::pos2(track_rect.center().x, track_y),
+            egui::vec2(2.0, 12.0),
+        ),
         egui::CornerRadius::same(1),
         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 60),
     );
 
     // ハンドルは縦長の長方形。
     let handle_x = track_rect.left() + track_rect.width() * fader.clamp(0.0, 1.0);
-    let handle_rect = egui::Rect::from_center_size(
-        egui::pos2(handle_x, track_y),
-        egui::vec2(6.0, height),
-    );
+    let handle_rect =
+        egui::Rect::from_center_size(egui::pos2(handle_x, track_y), egui::vec2(6.0, height));
     ui.painter().rect_filled(
         handle_rect,
         egui::CornerRadius::same(2),
@@ -904,7 +910,10 @@ fn render_deck_seek_bar(ui: &mut egui::Ui, deck: &mut StreamDeck) {
     if fraction > 0.0 {
         let filled = egui::Rect::from_min_max(
             track_rect.min,
-            egui::pos2(track_rect.left() + track_rect.width() * fraction, track_rect.bottom()),
+            egui::pos2(
+                track_rect.left() + track_rect.width() * fraction,
+                track_rect.bottom(),
+            ),
         );
         ui.painter()
             .rect_filled(filled, rounding, egui::Color32::from_rgb(56, 189, 248));
@@ -966,12 +975,36 @@ fn icon_button(ui: &mut egui::Ui, icon: TransportIcon, size: egui::Vec2) -> egui
             );
         }
         TransportIcon::Rewind => {
-            draw_triangle(painter, egui::pos2(center.x - 5.0, center.y), 7.0, false, color);
-            draw_triangle(painter, egui::pos2(center.x + 6.0, center.y), 7.0, false, color);
+            draw_triangle(
+                painter,
+                egui::pos2(center.x - 5.0, center.y),
+                7.0,
+                false,
+                color,
+            );
+            draw_triangle(
+                painter,
+                egui::pos2(center.x + 6.0, center.y),
+                7.0,
+                false,
+                color,
+            );
         }
         TransportIcon::Forward => {
-            draw_triangle(painter, egui::pos2(center.x - 6.0, center.y), 7.0, true, color);
-            draw_triangle(painter, egui::pos2(center.x + 5.0, center.y), 7.0, true, color);
+            draw_triangle(
+                painter,
+                egui::pos2(center.x - 6.0, center.y),
+                7.0,
+                true,
+                color,
+            );
+            draw_triangle(
+                painter,
+                egui::pos2(center.x + 5.0, center.y),
+                7.0,
+                true,
+                color,
+            );
         }
         TransportIcon::Enter => draw_enter_mark(painter, center, color),
     }
@@ -1000,7 +1033,11 @@ fn draw_triangle(
             egui::pos2(center.x - half, center.y),
         ]
     };
-    painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        color,
+        egui::Stroke::NONE,
+    ));
 }
 
 // Enter（リターン）マークを描く。右上から下→左へ折れて左向き矢じりで終わる矢印。

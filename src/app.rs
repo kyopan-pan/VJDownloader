@@ -23,7 +23,7 @@ use drag::{DragItem, Image, Options};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -76,10 +76,10 @@ pub struct DownloaderApp {
     pub(crate) last_scan: Instant,
     pub(crate) refresh_needed: bool,
     pub(crate) settings_ui: settings_ui::SettingsUiState,
-    pub(crate) log_ui: LogUiState,
-    pub(crate) speed_test_ui: SpeedTestUiState,
-    pub(crate) stream_ui: StreamUiState,
-    pub(crate) status_logs: AppLogger,
+    pub(crate) log_ui: Arc<Mutex<LogUiState>>,
+    pub(crate) speed_test_ui: Arc<Mutex<SpeedTestUiState>>,
+    pub(crate) stream_ui: Arc<Mutex<StreamUiState>>,
+    pub(crate) status_logs: Arc<Mutex<AppLogger>>,
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
     pub(crate) current_window_size: Option<egui::Vec2>,
@@ -152,10 +152,10 @@ impl DownloaderApp {
             last_scan: Instant::now() - Duration::from_secs(5),
             refresh_needed: true,
             settings_ui: settings_ui::SettingsUiState::new(),
-            log_ui: LogUiState::new(),
-            speed_test_ui: SpeedTestUiState::new(),
-            stream_ui: StreamUiState::new(),
-            status_logs: AppLogger::new(),
+            log_ui: Arc::new(Mutex::new(LogUiState::new())),
+            speed_test_ui: Arc::new(Mutex::new(SpeedTestUiState::new())),
+            stream_ui: Arc::new(Mutex::new(StreamUiState::new())),
+            status_logs: Arc::new(Mutex::new(AppLogger::new())),
             pending_window_resize: None,
             did_snap: false,
             current_window_size: None,
@@ -199,15 +199,9 @@ impl DownloaderApp {
     }
 
     pub(crate) fn push_status(&mut self, message: impl Into<String>) {
-        self.status_logs.push(message);
-    }
-
-    pub(crate) fn clear_logs(&mut self) {
-        self.status_logs.clear();
-    }
-
-    pub(crate) fn build_recent_log_snapshot(&self, duration: Duration) -> String {
-        self.status_logs.build_recent_snapshot(duration)
+        if let Ok(mut logs) = self.status_logs.lock() {
+            logs.push(message);
+        }
     }
 
     pub(crate) fn start_download_from_clipboard(&mut self) {
@@ -543,13 +537,19 @@ impl eframe::App for DownloaderApp {
             self.settings_ui.open_settings();
         }
         if mac_menu::take_open_logs_request() {
-            self.log_ui.open_logs();
+            if let Ok(mut state) = self.log_ui.lock() {
+                state.open_logs();
+            }
         }
         if mac_menu::take_open_speed_test_request() {
-            self.speed_test_ui.open_speed_test();
+            if let Ok(mut state) = self.speed_test_ui.lock() {
+                state.open_speed_test();
+            }
         }
         if mac_menu::take_open_stream_request() {
-            self.stream_ui.open_stream();
+            if let Ok(mut state) = self.stream_ui.lock() {
+                state.open_stream();
+            }
         }
         self.current_window_size = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.size()));
         if let Some(size) = self.pending_window_resize.take() {
@@ -567,8 +567,12 @@ impl eframe::App for DownloaderApp {
             }
         }
         self.settings_ui.poll_tool_updates();
-        self.speed_test_ui.poll_updates();
-        self.stream_ui.poll_updates();
+        if let Ok(mut state) = self.speed_test_ui.lock() {
+            state.poll_updates();
+        }
+        if let Ok(mut state) = self.stream_ui.lock() {
+            state.poll_updates();
+        }
         self.settings_ui.auto_refresh_if_needed();
         self.poll_input_mode_change();
         self.poll_download_events();
@@ -576,11 +580,14 @@ impl eframe::App for DownloaderApp {
         self.poll_search_results();
         self.submit_search_if_needed();
         ui::render(self, root_ui, frame);
-        speed_test_ui::render_speed_test_viewport(self, &ctx);
-        stream_ui::render_stream_viewport(self, &ctx);
+        speed_test_ui::render_speed_test_viewport(&self.speed_test_ui, &ctx);
+        stream_ui::render_stream_viewport(&self.stream_ui, self.settings_ui.cookie_args(), &ctx);
     }
 
     fn on_exit(&mut self) {
+        if let Ok(mut stream) = self.stream_ui.lock() {
+            stream.stop_all();
+        }
         let mut data = SettingsData::load();
         if let Some(size) = self.current_window_size {
             data.window_width = format_dimension(size.x.max(320.0));
