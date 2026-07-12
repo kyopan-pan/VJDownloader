@@ -78,6 +78,7 @@ pub struct DownloaderApp {
     pub(crate) settings_ui: settings_ui::SettingsUiState,
     pub(crate) log_ui: LogUiState,
     pub(crate) speed_test_ui: SpeedTestUiState,
+    pub(crate) stream_ui: StreamUiState,
     pub(crate) status_logs: AppLogger,
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
@@ -153,6 +154,7 @@ impl DownloaderApp {
             settings_ui: settings_ui::SettingsUiState::new(),
             log_ui: LogUiState::new(),
             speed_test_ui: SpeedTestUiState::new(),
+            stream_ui: StreamUiState::new(),
             status_logs: AppLogger::new(),
             pending_window_resize: None,
             did_snap: false,
@@ -573,11 +575,9 @@ impl eframe::App for DownloaderApp {
         self.refresh_downloads_if_needed();
         self.poll_search_results();
         self.submit_search_if_needed();
-        ui::render(self, ctx, _frame);
-        speed_test_ui::render_speed_test_viewport(self, ctx);
-        stream_ui::render_stream_viewport(self, ctx);
         ui::render(self, root_ui, frame);
         speed_test_ui::render_speed_test_viewport(self, &ctx);
+        stream_ui::render_stream_viewport(self, &ctx);
     }
 
     fn on_exit(&mut self) {

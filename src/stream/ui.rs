@@ -436,7 +436,7 @@ pub fn render_stream_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = true;
                 egui::Window::new("ストリーム再生")
                     .collapsible(false)
@@ -451,8 +451,9 @@ pub fn render_stream_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
                 }
             }
             _ => {
+                let content_ctx = ctx.clone();
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    render_stream_contents(ui, app, ctx);
+                    render_stream_contents(ui, app, &content_ctx);
                 });
             }
         }
