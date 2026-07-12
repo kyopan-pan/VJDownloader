@@ -353,6 +353,8 @@ pub struct StreamUiState {
     syphon_enabled: bool,
     #[cfg(feature = "syphon")]
     syphon: Option<crate::stream::syphon::SyphonPublisher>,
+    #[cfg(feature = "syphon")]
+    syphon_error: Option<String>,
 }
 
 impl StreamUiState {
@@ -366,6 +368,8 @@ impl StreamUiState {
             syphon_enabled: false,
             #[cfg(feature = "syphon")]
             syphon: None,
+            #[cfg(feature = "syphon")]
+            syphon_error: None,
         }
     }
 
@@ -547,13 +551,25 @@ fn render_syphon_toggle(ui: &mut egui::Ui, stream: &mut StreamUiState) {
             "Syphon出力（マスターをVDMX等へ送信）",
         );
         if stream.syphon_enabled {
-            let status = if stream.syphon.is_some() {
-                "配信中: VJDownloader Master"
+            let status = if let Some(publisher) = stream.syphon.as_ref() {
+                let clients = if publisher.has_clients() {
+                    "受信側: 接続あり"
+                } else {
+                    "受信側: 未接続"
+                };
+                format!(
+                    "配信中: {} / {} / 送信フレーム: {}",
+                    crate::stream::syphon::SyphonPublisher::server_name(),
+                    clients,
+                    publisher.published_frames()
+                )
+            } else if let Some(error) = stream.syphon_error.as_ref() {
+                format!("初期化失敗: {error}")
             } else {
-                "初期化待ち…（Syphon.framework 未リンク時は無効）"
+                "初期化待ち…".to_string()
             };
             ui.label(
-                egui::RichText::new(status)
+                egui::RichText::new(status.as_str())
                     .size(11.0)
                     .color(egui::Color32::from_rgb(150, 160, 180)),
             );
@@ -562,6 +578,7 @@ fn render_syphon_toggle(ui: &mut egui::Ui, stream: &mut StreamUiState) {
     // OFF にしたらサーバを破棄。
     if !stream.syphon_enabled {
         stream.syphon = None;
+        stream.syphon_error = None;
     }
 }
 
@@ -571,16 +588,19 @@ fn publish_master(stream: &mut StreamUiState, ctx: &egui::Context) {
     if !stream.syphon_enabled {
         return;
     }
-    if stream.syphon.is_none() {
-        stream.syphon = crate::stream::syphon::SyphonPublisher::new(
+    if stream.syphon.is_none() && stream.syphon_error.is_none() {
+        match crate::stream::syphon::SyphonPublisher::new(
             PREVIEW_WIDTH,
             PREVIEW_HEIGHT,
-            "VJDownloader Master",
-        );
+            crate::stream::syphon::SyphonPublisher::server_name(),
+        ) {
+            Ok(publisher) => stream.syphon = Some(publisher),
+            Err(error) => stream.syphon_error = Some(error),
+        }
     }
     if let Some(publisher) = stream.syphon.as_ref() {
         let bgra = stream.master_bgra();
-        publisher.publish(&bgra);
+        let _ = publisher.publish(&bgra);
         // 連続配信のため再描画を要求する。
         ctx.request_repaint();
     }

@@ -21,8 +21,9 @@ reqwest = { version = "0.13.4", default-features = false, features = ["blocking"
 tempfile = "3.25.0"
 
 [features]
+default = ["syphon"]
 # 公式 Syphon.framework をリンクし、マスター映像を Syphon サーバとして配信する。
-# ビルドには Syphon.framework（full Xcode でビルド）が必要。詳細は build.rs / CI 参照。
+# Syphon.framework は実行時に読み込む。未配置時はUIに初期化失敗として表示する。
 syphon = ["dep:objc2-metal", "dep:objc2-core-foundation"]
 
 [profile.dev]

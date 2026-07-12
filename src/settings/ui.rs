@@ -1044,7 +1044,8 @@ fn auto_save_settings_if_changed(app: &mut DownloaderApp) {
     let roots = app.settings_ui.form.data.search_roots.clone();
     if roots != previous_roots {
         if let Err(err) = app.sync_search_roots(&roots) {
-            app.settings_ui.form.last_failed_data = Some(app.settings_ui.form.data.clone());
+            app.settings_ui.form.last_saved_data = app.settings_ui.form.data.clone();
+            app.settings_ui.form.last_failed_data = None;
             app.settings_ui.form.error =
                 Some(format!("検索対象フォルダの同期に失敗しました: {err}"));
             return;
@@ -1065,12 +1066,6 @@ fn normalize_search_roots(roots: &[String]) -> Result<Vec<String>, String> {
             continue;
         }
         let absolute = make_absolute_path(trimmed);
-        if !absolute.is_dir() {
-            return Err(format!(
-                "検索対象フォルダがディレクトリではありません: {}",
-                absolute.to_string_lossy()
-            ));
-        }
         let normalized = absolute.to_string_lossy().to_string();
         if !out.iter().any(|existing| existing == &normalized) {
             out.push(normalized);

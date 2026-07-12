@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
+use url::Url;
 
 use crate::download::{ProcessTracker, js_runtime_arg};
 use crate::fs_utils::is_executable;
@@ -30,6 +31,11 @@ pub const PREVIEW_HEIGHT: usize = 270;
 // プレビューは固定フレームレート(CFR)でデコードし、フレーム番号から提示時刻(PTS)を算出する。
 pub const PREVIEW_FPS: f64 = 30.0;
 const FRAME_BYTES: usize = PREVIEW_WIDTH * PREVIEW_HEIGHT * 4;
+const YOUTUBE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+    (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
+const YOUTUBE_INPUT_HEADERS: &str = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n\
+Accept-Language: en-us,en;q=0.5\r\n\
+Sec-Fetch-Mode: navigate\r\n";
 
 #[cfg(feature = "syphon")]
 const FORMAT_SELECTOR: &str = "bv*[height<=720]+ba/b[height<=720]/b";
@@ -117,6 +123,7 @@ fn resolve_media(url: &str, cookie_args: &[String]) -> Result<(Option<f64>, Vec<
         return Err("yt-dlpが見つかりません。".to_string());
     }
 
+    println!("[stream] yt-dlp resolve start: {url}");
     let mut cmd = Command::new(&yt_dlp);
     cmd.arg("--no-playlist");
     cmd.args(cookie_args);
@@ -136,13 +143,17 @@ fn resolve_media(url: &str, cookie_args: &[String]) -> Result<(Option<f64>, Vec<
     let output = cmd
         .output()
         .map_err(|err| format!("yt-dlpの起動に失敗しました: {err}"))?;
+    println!("[stream] yt-dlp exited: {}", output.status);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            println!("[stream] yt-dlp stderr:\n{}", sanitize_log_text(&stderr));
+        }
         let detail = if stderr.is_empty() {
             output.status.to_string()
         } else {
-            stderr
+            sanitize_log_text(&stderr)
         };
         return Err(format!("URL解決に失敗しました: {detail}"));
     }
@@ -161,6 +172,14 @@ fn resolve_media(url: &str, cookie_args: &[String]) -> Result<(Option<f64>, Vec<
 
     if urls.is_empty() {
         return Err("再生用URLを取得できませんでした。".to_string());
+    }
+    println!(
+        "[stream] yt-dlp resolved: duration={:?}, urls={}",
+        duration,
+        urls.len()
+    );
+    for (index, url) in urls.iter().enumerate() {
+        println!("[stream] media url {index}: {}", summarize_media_url(url));
     }
     Ok((duration, urls))
 }
@@ -191,22 +210,69 @@ fn run_ffmpeg(
         return Ok(());
     }
 
+    println!(
+        "[stream] ffmpeg start: inputs={}, offset={start_offset:.3}, size={}x{}, fps={}",
+        urls.len(),
+        PREVIEW_WIDTH,
+        PREVIEW_HEIGHT,
+        PREVIEW_FPS
+    );
     let mut child = build_ffmpeg_command(&ffmpeg, urls, start_offset)
         .spawn()
         .map_err(|err| format!("ffmpegの起動に失敗しました: {err}"))?;
     tracker.register(&child);
 
-    if let Some(stderr) = child.stderr.take() {
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+    let stderr_handle = if let Some(stderr) = child.stderr.take() {
         let tx = tx.clone();
-        thread::spawn(move || read_progress(stderr, tx, run_id, start_offset));
+        Some(thread::spawn(move || {
+            read_progress(stderr, tx, stderr_tx, run_id, start_offset)
+        }))
+    } else {
+        None
+    };
+
+    let (frame_count, receiver_closed) = match child.stdout.take() {
+        Some(stdout) => read_frames(stdout, frame_tx, run_id, start_offset),
+        None => (0, false),
+    };
+
+    if receiver_closed || cancel_flag.load(Ordering::Relaxed) {
+        tracker.terminate_all();
+        let _ = child.wait();
+        println!(
+            "[stream] ffmpeg stopped by receiver/cancel: frames={frame_count}, receiver_closed={receiver_closed}"
+        );
+        return Ok(());
     }
 
-    if let Some(stdout) = child.stdout.take() {
-        read_frames(stdout, frame_tx, run_id, start_offset);
+    let status = child
+        .wait()
+        .map_err(|err| format!("ffmpegの終了待ちに失敗しました: {err}"))?;
+    if let Some(handle) = stderr_handle {
+        let _ = handle.join();
     }
-
-    tracker.terminate_all();
-    let _ = child.wait();
+    let stderr_tail = collect_stderr_tail(stderr_rx);
+    println!("[stream] ffmpeg exited: {status}, frames={frame_count}");
+    if !stderr_tail.is_empty() {
+        println!("[stream] ffmpeg stderr tail:\n{stderr_tail}");
+    }
+    if !status.success() {
+        let detail = if stderr_tail.is_empty() {
+            status.to_string()
+        } else {
+            format!("{status}: {stderr_tail}")
+        };
+        return Err(format!("ffmpegが異常終了しました: {detail}"));
+    }
+    if frame_count == 0 {
+        let detail = if stderr_tail.is_empty() {
+            "詳細なし".to_string()
+        } else {
+            stderr_tail
+        };
+        return Err(format!("ffmpegから映像フレームを取得できませんでした: {detail}"));
+    }
     Ok(())
 }
 
@@ -236,6 +302,12 @@ fn build_ffmpeg_command(ffmpeg: &Path, urls: &[String], start_offset: f64) -> Co
             .arg("1")
             .arg("-reconnect_delay_max")
             .arg("5")
+            .arg("-user_agent")
+            .arg(YOUTUBE_USER_AGENT)
+            .arg("-referer")
+            .arg("https://www.youtube.com/")
+            .arg("-headers")
+            .arg(YOUTUBE_INPUT_HEADERS)
             .arg("-ss")
             .arg(&offset)
             .arg("-i")
@@ -272,10 +344,11 @@ fn read_frames<R: Read>(
     frame_tx: &mpsc::Sender<StreamFrame>,
     run_id: u64,
     start_offset: f64,
-) {
+) -> (u64, bool) {
     let mut reader = std::io::BufReader::new(reader);
     let mut buf = vec![0u8; FRAME_BYTES];
     let mut index: u64 = 0;
+    let mut receiver_closed = false;
     loop {
         match reader.read_exact(&mut buf) {
             Ok(()) => {
@@ -286,6 +359,7 @@ fn read_frames<R: Read>(
                     rgba: buf.clone(),
                 };
                 if frame_tx.send(frame).is_err() {
+                    receiver_closed = true;
                     break;
                 }
                 index += 1;
@@ -293,12 +367,14 @@ fn read_frames<R: Read>(
             Err(_) => break,
         }
     }
+    (index, receiver_closed)
 }
 
 // ffmpeg の stderr を解析し、再生位置(time=)を Position、その他をログへ送る。
 fn read_progress<R: Read>(
     reader: R,
     tx: mpsc::Sender<StreamEvent>,
+    stderr_tx: mpsc::Sender<String>,
     run_id: u64,
     start_offset: f64,
 ) {
@@ -314,18 +390,19 @@ fn read_progress<R: Read>(
         for &byte in &buf[..read] {
             // ffmpeg の進捗は \r 区切りのため改行・復帰の双方で分割する。
             if byte == b'\n' || byte == b'\r' {
-                flush_progress_segment(&mut segment, &tx, run_id, start_offset);
+                flush_progress_segment(&mut segment, &tx, &stderr_tx, run_id, start_offset);
             } else {
                 segment.push(byte);
             }
         }
     }
-    flush_progress_segment(&mut segment, &tx, run_id, start_offset);
+    flush_progress_segment(&mut segment, &tx, &stderr_tx, run_id, start_offset);
 }
 
 fn flush_progress_segment(
     segment: &mut Vec<u8>,
     tx: &mpsc::Sender<StreamEvent>,
+    stderr_tx: &mpsc::Sender<String>,
     run_id: u64,
     start_offset: f64,
 ) {
@@ -343,7 +420,65 @@ fn flush_progress_segment(
             run_id,
             secs: start_offset + secs,
         });
+    } else {
+        let sanitized = sanitize_log_text(&text);
+        println!("[stream] ffmpeg stderr: {sanitized}");
+        let _ = stderr_tx.send(sanitized);
     }
+}
+
+fn collect_stderr_tail(rx: mpsc::Receiver<String>) -> String {
+    let mut lines = Vec::new();
+    while let Ok(line) = rx.try_recv() {
+        lines.push(line);
+    }
+    let joined = lines.join("\n");
+    const MAX_LEN: usize = 1200;
+    if joined.len() <= MAX_LEN {
+        joined
+    } else {
+        let mut tail = joined
+            .chars()
+            .rev()
+            .take(MAX_LEN)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        tail.insert_str(0, "...");
+        tail
+    }
+}
+
+fn summarize_media_url(raw: &str) -> String {
+    let Ok(url) = Url::parse(raw) else {
+        return "[media-url]".to_string();
+    };
+    let host = url.host_str().unwrap_or("unknown-host");
+    let mut parts = Vec::new();
+    for key in ["itag", "mime", "c", "dur", "clen"] {
+        if let Some((_, value)) = url.query_pairs().find(|(name, _)| name == key) {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+    if parts.is_empty() {
+        host.to_string()
+    } else {
+        format!("{host}?{}", parts.join("&"))
+    }
+}
+
+fn sanitize_log_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|token| {
+            if token.starts_with("http://") || token.starts_with("https://") {
+                summarize_media_url(token)
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ffmpeg stats 行から `time=HH:MM:SS.xx` を秒に変換する。
