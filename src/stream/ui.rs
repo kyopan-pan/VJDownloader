@@ -348,9 +348,7 @@ pub struct StreamUiState {
     deck_b: StreamDeck,
     // マスタークロスフェード。0.0 = A のみ、1.0 = B のみ。
     fader: f32,
-    // Syphon 出力（マスターを VDMX 等へ送信）の有効/無効とサーバ実体。
-    #[cfg(feature = "syphon")]
-    syphon_enabled: bool,
+    // Syphon 出力（マスターを VDMX 等へ常時送信）のサーバ実体。
     #[cfg(feature = "syphon")]
     syphon: Option<crate::stream::syphon::SyphonPublisher>,
     #[cfg(feature = "syphon")]
@@ -364,8 +362,6 @@ impl StreamUiState {
             deck_a: StreamDeck::new("A", "stream_preview_a"),
             deck_b: StreamDeck::new("B", "stream_preview_b"),
             fader: 0.0,
-            #[cfg(feature = "syphon")]
-            syphon_enabled: false,
             #[cfg(feature = "syphon")]
             syphon: None,
             #[cfg(feature = "syphon")]
@@ -407,6 +403,12 @@ impl StreamUiState {
     fn stop_all(&mut self) {
         self.deck_a.stop();
         self.deck_b.stop();
+        #[cfg(feature = "syphon")]
+        {
+            // ウィンドウを閉じている間は Syphon サーバーの公開も停止する。
+            self.syphon = None;
+            self.syphon_error = None;
+        }
     }
 
     pub fn poll_updates(&mut self) {
@@ -519,10 +521,10 @@ fn render_stream_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui
                 gap,
             );
 
-            // Syphon 出力トグルとマスター配信（フィーチャー有効時のみ）。
+            // Syphon の状態表示とマスター配信（フィーチャー有効時のみ）。
             #[cfg(feature = "syphon")]
             {
-                render_syphon_toggle(ui, stream);
+                render_syphon_status(ui, stream);
                 publish_master(stream, ctx);
             }
 
@@ -541,53 +543,39 @@ fn rgb_at(buf: Option<&[u8]>, p: usize) -> (u8, u8, u8) {
     }
 }
 
-// Syphon 出力の ON/OFF トグル。
+// 常時有効な Syphon 出力の状態表示。
 #[cfg(feature = "syphon")]
-fn render_syphon_toggle(ui: &mut egui::Ui, stream: &mut StreamUiState) {
+fn render_syphon_status(ui: &mut egui::Ui, stream: &StreamUiState) {
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {
-        ui.checkbox(
-            &mut stream.syphon_enabled,
-            "Syphon出力（マスターをVDMX等へ送信）",
-        );
-        if stream.syphon_enabled {
-            let status = if let Some(publisher) = stream.syphon.as_ref() {
-                let clients = if publisher.has_clients() {
-                    "受信側: 接続あり"
-                } else {
-                    "受信側: 未接続"
-                };
-                format!(
-                    "配信中: {} / {} / 送信フレーム: {}",
-                    crate::stream::syphon::SyphonPublisher::server_name(),
-                    clients,
-                    publisher.published_frames()
-                )
-            } else if let Some(error) = stream.syphon_error.as_ref() {
-                format!("初期化失敗: {error}")
+        let status = if let Some(publisher) = stream.syphon.as_ref() {
+            let clients = if publisher.has_clients() {
+                "受信側: 接続あり"
             } else {
-                "初期化待ち…".to_string()
+                "受信側: 未接続"
             };
-            ui.label(
-                egui::RichText::new(status.as_str())
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(150, 160, 180)),
-            );
-        }
+            format!(
+                "配信中: {} / {} / 送信フレーム: {}",
+                crate::stream::syphon::SyphonPublisher::server_name(),
+                clients,
+                publisher.published_frames()
+            )
+        } else if let Some(error) = stream.syphon_error.as_ref() {
+            format!("初期化失敗: {error}")
+        } else {
+            "初期化待ち…".to_string()
+        };
+        ui.label(
+            egui::RichText::new(status.as_str())
+                .size(11.0)
+                .color(egui::Color32::from_rgb(150, 160, 180)),
+        );
     });
-    // OFF にしたらサーバを破棄。
-    if !stream.syphon_enabled {
-        stream.syphon = None;
-        stream.syphon_error = None;
-    }
 }
 
 // マスターを Syphon サーバへ1フレーム配信する。
 #[cfg(feature = "syphon")]
 fn publish_master(stream: &mut StreamUiState, ctx: &egui::Context) {
-    if !stream.syphon_enabled {
-        return;
-    }
     if stream.syphon.is_none() && stream.syphon_error.is_none() {
         match crate::stream::syphon::SyphonPublisher::new(
             PREVIEW_WIDTH,
