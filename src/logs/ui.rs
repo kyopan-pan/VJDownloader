@@ -50,7 +50,7 @@ pub fn render_log_viewport(
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = true;
                 egui::Window::new("ログ")
                     .collapsible(false)

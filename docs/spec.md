@@ -96,8 +96,8 @@
 - 直リンク取得（優先）: `AnimeThemes API`（`/anime/<slug>?include=animethemes.animethemeentries.videos`）を優先し、必要に応じて`/anime?filter[slug]=<slug>&include=...`も試行する。
 - APIレスポンスはJSON:API形式（`included` + `relationships`）と従来のネスト形式の両方に対応し、`theme.slug/type+sequence -> animethemeentries -> videos -> link`を辿って`.webm`を抽出する。
 - APIで取得できない場合はHTML解析へフォールバックし、`curl -sL -m 8 -A <UA> --range 0-262143`で先頭を取得して`og:video`または`video src`から`https://.../*.webm`を抽出する。見つからない場合は全文取得で再試行する。
-- 直リンクを取得できた場合は`curl`の受信バイト列を`ffmpeg`の`stdin`へ逐次転送し、ダウンロードと変換を同時進行させる。
-- 直リンク経路のダウンロード進捗は`Content-Length`と転送量から算出し、受信中に`n%`を表示する。
+- 直リンクを取得できた場合はRust HTTPクライアントでGETを直ちに開始し、レスポンス本文を`ffmpeg`の`stdin`へ逐次転送してダウンロードと変換を同時進行させる。事前のHEADリクエストは行わない。
+- 直リンク経路のダウンロード進捗は、同じGETレスポンスの`Content-Length`と転送量から算出し、受信中に`n%`を表示する。`Content-Length`がない場合は受信済みMBを表示する。
 - ダウンロード進捗は進捗バーだけでなくログにも`ダウンロード進捗: n%`として出力する。
 - ffmpeg変換は`h264_videotoolbox`を必須とし、利用できない場合は処理を中断する。
 - ffmpeg変換ログは整形せずデフォルト出力をそのままステータスログへ出力する。
@@ -218,9 +218,10 @@
 - ファイル削除失敗時はステータスに`削除に失敗しました: <error>`を表示する。
 - ドラッグ開始失敗時はステータスにエラーを表示する。
 
-## mp4検索インデックス（SQLite）
-- mp4検索は`~/.vjdownloader/search_index.sqlite3`のSQLiteインデックスを使用する。
-- `roots`テーブルで検索対象ルートフォルダを管理し、`files`テーブルでmp4ファイル情報を管理する。
+## 動画検索インデックス（SQLite）
+- 動画検索は`~/.vjdownloader/search_index.sqlite3`のSQLiteインデックスを使用する。
+- 検索対象の拡張子は`.mp4`、`.mov`、`.m4v`、`.webm`、`.mkv`とし、大文字・小文字を区別しない。
+- `roots`テーブルで検索対象ルートフォルダを管理し、`files`テーブルで動画ファイル情報を管理する。
 - `files`には`path`（PK）、`root_id`、`file_name`、`file_name_norm`、`parent_dir`、`size_bytes`、`modified_time`、`created_time`、`last_indexed_time`を保持する。
 - `roots`には`root_id`（PK）、`root_path`、`is_enabled`、`last_scan_time`を保持する。
 - `files.root_id`、`files.parent_dir`、`files.file_name_norm`、`files.modified_time`、`files.size_bytes`にインデックスを作成する。

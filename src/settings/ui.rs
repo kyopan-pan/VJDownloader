@@ -296,7 +296,7 @@ fn render_initial_setup_viewport(
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = true;
                 egui::Window::new("初回セットアップ")
                     .collapsible(false)
@@ -347,7 +347,7 @@ fn render_settings_viewport(
         }
 
         match class {
-            egui::ViewportClass::Embedded => {
+            egui::ViewportClass::EmbeddedWindow => {
                 let mut open = true;
                 egui::Window::new("設定")
                     .collapsible(false)
@@ -772,7 +772,7 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
                 });
             });
             ui.label(
-                egui::RichText::new("mp4検索対象のルートフォルダを複数指定できます。")
+                egui::RichText::new("動画検索対象のルートフォルダを複数指定できます。")
                     .size(11.5)
                     .color(egui::Color32::from_rgb(140, 150, 170)),
             );

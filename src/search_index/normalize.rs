@@ -58,12 +58,31 @@ pub(super) fn path_to_key(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-// MP4 ファイルかどうかを拡張子で判定する。
-pub(super) fn is_mp4_path(path: &Path) -> bool {
+// 検索対象の動画ファイルかどうかを拡張子で判定する。
+pub(super) fn is_supported_video_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("mp4"))
+        .map(|ext| {
+            ["mp4", "mov", "m4v", "webm", "mkv"]
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_supported_video_path;
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_supported_video_extensions_case_insensitively() {
+        for path in ["a.mp4", "a.MOV", "a.m4v", "a.WebM", "a.MKV"] {
+            assert!(is_supported_video_path(Path::new(path)), "{path}");
+        }
+        assert!(!is_supported_video_path(Path::new("a.avi")));
+        assert!(!is_supported_video_path(Path::new("a.txt")));
+    }
 }
 
 // SystemTime を UNIX 秒へ変換する。

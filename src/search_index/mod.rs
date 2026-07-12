@@ -419,13 +419,16 @@ mod tests {
     }
 
     #[test]
-    fn indexes_and_searches_japanese_mp4() {
+    fn indexes_and_searches_supported_video_formats() {
         let (temp, engine) = setup_engine();
         let root = temp.path().join("videos");
         fs::create_dir_all(&root).expect("create root");
 
         write_dummy(&root.join("旅行_沖縄.mp4"), 64);
-        write_dummy(&root.join("会議録画_2026.mp4"), 64);
+        write_dummy(&root.join("会議録画_2026.mov"), 64);
+        write_dummy(&root.join("素材.m4v"), 64);
+        write_dummy(&root.join("透過.webm"), 64);
+        write_dummy(&root.join("保存.MKV"), 64);
         write_dummy(&root.join("ignore.txt"), 64);
 
         engine.sync_roots(&[root.clone()]).expect("sync roots");
@@ -442,6 +445,14 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert!(hits[0].file_name.contains("旅行_沖縄"));
+
+        let all_hits = engine
+            .search(&SearchRequest {
+                limit: 20,
+                ..Default::default()
+            })
+            .expect("search all supported videos");
+        assert_eq!(all_hits.len(), 5);
     }
 
     #[test]

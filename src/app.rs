@@ -78,7 +78,6 @@ pub struct DownloaderApp {
     pub(crate) settings_ui: settings_ui::SettingsUiState,
     pub(crate) log_ui: LogUiState,
     pub(crate) speed_test_ui: SpeedTestUiState,
-    pub(crate) stream_ui: StreamUiState,
     pub(crate) status_logs: AppLogger,
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
@@ -154,7 +153,6 @@ impl DownloaderApp {
             settings_ui: settings_ui::SettingsUiState::new(),
             log_ui: LogUiState::new(),
             speed_test_ui: SpeedTestUiState::new(),
-            stream_ui: StreamUiState::new(),
             status_logs: AppLogger::new(),
             pending_window_resize: None,
             did_snap: false,
@@ -536,8 +534,9 @@ impl DownloaderApp {
 }
 
 impl eframe::App for DownloaderApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.maintain_cursor_tracking(ctx);
+    fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = root_ui.ctx().clone();
+        self.maintain_cursor_tracking(&ctx);
         if mac_menu::take_open_settings_request() {
             self.settings_ui.open_settings();
         }
@@ -577,9 +576,11 @@ impl eframe::App for DownloaderApp {
         ui::render(self, ctx, _frame);
         speed_test_ui::render_speed_test_viewport(self, ctx);
         stream_ui::render_stream_viewport(self, ctx);
+        ui::render(self, root_ui, frame);
+        speed_test_ui::render_speed_test_viewport(self, &ctx);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         let mut data = SettingsData::load();
         if let Some(size) = self.current_window_size {
             data.window_width = format_dimension(size.x.max(320.0));
