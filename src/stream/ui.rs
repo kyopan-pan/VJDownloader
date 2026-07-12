@@ -783,8 +783,8 @@ fn render_deck_preview(ui: &mut egui::Ui, deck: &StreamDeck, size: egui::Vec2) {
     draw_corner_badge(ui.painter(), rect, deck.label);
 }
 
-// マスタープレビュー。A を不透明で描画し、B をフェーダー値の不透明度で重ねて
-// 線形クロスフェード（左端=A, 右端=B）を表示する。
+// マスタープレビュー。黒を下地に A*(1-f)+B*f で合成し、未ロード側は黒として扱う。
+// これにより片側だけロードされている場合も、反対側へ寄せるほど黒へフェードする。
 fn render_master_preview(
     ui: &mut egui::Ui,
     deck_a: &StreamDeck,
@@ -798,13 +798,20 @@ fn render_master_preview(
     painter.rect_filled(rect, rounding, egui::Color32::BLACK);
 
     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    // 下地: A を不透明で描画。
+    let fader = fader.clamp(0.0, 1.0);
+    // A は左端で不透明、右端で透明にする。未ロードなら黒い下地がそのまま残る。
     if let Some(texture) = deck_a.texture.as_ref() {
-        painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+        let alpha = ((1.0 - fader) * 255.0).round() as u8;
+        painter.image(
+            texture.id(),
+            rect,
+            uv,
+            egui::Color32::from_white_alpha(alpha),
+        );
     }
-    // 上に B をフェーダー不透明度で合成。alpha=f なので結果は A*(1-f)+B*f。
+    // B は左端で透明、右端で不透明にする。
     if let Some(texture) = deck_b.texture.as_ref() {
-        let alpha = (fader.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let alpha = (fader * 255.0).round() as u8;
         painter.image(
             texture.id(),
             rect,
