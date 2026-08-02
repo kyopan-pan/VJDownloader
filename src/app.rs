@@ -4,23 +4,26 @@ use crate::download::{
     read_clipboard_text, run_download,
 };
 use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
-use crate::mac_input_source::{InputMode, current_mode};
-use crate::mac_menu;
-use crate::mac_window;
+use crate::logs::AppLogger;
+use crate::logs::ui::LogUiState;
 use crate::paths::{search_index_db_path, yt_dlp_path};
+use crate::platform::input_source::{InputMode, current_mode};
+use crate::platform::menu as mac_menu;
+use crate::platform::window as mac_window;
 use crate::search_index::{SearchEngine, SearchHit, SearchRequest, SearchSort};
-use crate::settings::{SettingsData, save_settings};
-use crate::settings_ui;
-use crate::speed_test_ui;
-use crate::speed_test_ui::SpeedTestUiState;
+use crate::settings::ui as settings_ui;
+use crate::settings::{SettingsData, cookie_args_from_settings, save_settings};
+use crate::speed_test as speed_test_ui;
+use crate::speed_test::SpeedTestUiState;
+use crate::stream::ui as stream_ui;
+use crate::stream::ui::StreamUiState;
 use crate::theme::apply_theme;
 use crate::ui;
-use crate::{app_logger::AppLogger, log_ui::LogUiState};
 use drag::{DragItem, Image, Options};
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -72,10 +75,12 @@ pub struct DownloaderApp {
     pub(crate) rx: Option<mpsc::Receiver<DownloadEvent>>,
     pub(crate) last_scan: Instant,
     pub(crate) refresh_needed: bool,
-    pub(crate) settings_ui: settings_ui::SettingsUiState,
-    pub(crate) log_ui: LogUiState,
-    pub(crate) speed_test_ui: SpeedTestUiState,
-    pub(crate) status_logs: AppLogger,
+    pub(crate) settings_ui: settings_ui::SettingsUiHandle,
+    pub(crate) cookie_args: Vec<String>,
+    pub(crate) log_ui: Arc<Mutex<LogUiState>>,
+    pub(crate) speed_test_ui: Arc<Mutex<SpeedTestUiState>>,
+    pub(crate) stream_ui: Arc<Mutex<StreamUiState>>,
+    pub(crate) status_logs: Arc<Mutex<AppLogger>>,
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
     pub(crate) current_window_size: Option<egui::Vec2>,
@@ -93,7 +98,6 @@ pub struct DownloaderApp {
     search_dirty: bool,
     last_input_mode: Option<InputMode>,
     last_focus_state: Option<bool>,
-    cursor_resync_until: Option<Instant>,
 }
 
 impl DownloaderApp {
@@ -147,10 +151,12 @@ impl DownloaderApp {
             rx: None,
             last_scan: Instant::now() - Duration::from_secs(5),
             refresh_needed: true,
-            settings_ui: settings_ui::SettingsUiState::new(),
-            log_ui: LogUiState::new(),
-            speed_test_ui: SpeedTestUiState::new(),
-            status_logs: AppLogger::new(),
+            settings_ui: settings_ui::SettingsUiHandle::new(),
+            cookie_args: cookie_args_from_settings(&settings),
+            log_ui: Arc::new(Mutex::new(LogUiState::new())),
+            speed_test_ui: Arc::new(Mutex::new(SpeedTestUiState::new())),
+            stream_ui: Arc::new(Mutex::new(StreamUiState::new())),
+            status_logs: Arc::new(Mutex::new(AppLogger::new())),
             pending_window_resize: None,
             did_snap: false,
             current_window_size: None,
@@ -168,7 +174,6 @@ impl DownloaderApp {
             search_dirty: true,
             last_input_mode: None,
             last_focus_state: None,
-            cursor_resync_until: None,
         };
 
         mac_menu::install_settings_menu();
@@ -194,15 +199,9 @@ impl DownloaderApp {
     }
 
     pub(crate) fn push_status(&mut self, message: impl Into<String>) {
-        self.status_logs.push(message);
-    }
-
-    pub(crate) fn clear_logs(&mut self) {
-        self.status_logs.clear();
-    }
-
-    pub(crate) fn build_recent_log_snapshot(&self, duration: Duration) -> String {
-        self.status_logs.build_recent_snapshot(duration)
+        if let Ok(mut logs) = self.status_logs.lock() {
+            logs.push(message);
+        }
     }
 
     pub(crate) fn start_download_from_clipboard(&mut self) {
@@ -220,7 +219,7 @@ impl DownloaderApp {
         }
 
         let output_dir = self.download_dir.clone();
-        let cookie_args = self.settings_ui.cookie_args();
+        let cookie_args = self.cookie_args.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.download_in_progress = true;
@@ -329,10 +328,20 @@ impl DownloaderApp {
             }
         }
 
+        // キャンセルで強制終了したプロセスが吐く終了エラー出力はログに残さない。
+        let cancelling = self
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed));
+
         let mut done = None;
         for event in events {
             match event {
-                DownloadEvent::Log(line) => self.push_status(line),
+                DownloadEvent::Log(line) => {
+                    if !cancelling {
+                        self.push_status(line);
+                    }
+                }
                 DownloadEvent::Progress(update) => self.handle_progress_update(update),
                 DownloadEvent::Done(result, elapsed) => done = Some((result, elapsed)),
             }
@@ -481,41 +490,14 @@ impl DownloaderApp {
     }
 
     fn maintain_cursor_tracking(&mut self, ctx: &egui::Context) {
-        const CURSOR_RESYNC_WINDOW: Duration = Duration::from_millis(900);
-        const CURSOR_SYNC_TICK: Duration = Duration::from_millis(16);
-
         let focused = ctx.input(|i| i.focused);
-        let now = Instant::now();
-        let mut force_reset = false;
-
-        match self.last_focus_state {
-            Some(prev) if prev != focused => {
-                force_reset = true;
-                if focused {
-                    self.cursor_resync_until = Some(now + CURSOR_RESYNC_WINDOW);
-                }
-            }
-            None => {
-                force_reset = true;
-                if focused {
-                    self.cursor_resync_until = Some(now + CURSOR_RESYNC_WINDOW);
-                }
-            }
-            _ => {}
-        }
+        let focus_changed = self.last_focus_state != Some(focused);
         self.last_focus_state = Some(focused);
 
-        if self
-            .cursor_resync_until
-            .is_some_and(|deadline| deadline <= now)
-        {
-            self.cursor_resync_until = None;
-        }
-
-        let should_poll = self.cursor_resync_until.is_some();
-        mac_window::enable_mouse_move_events_for_all_windows(force_reset || should_poll);
-        if should_poll {
-            ctx.request_repaint_after(CURSOR_SYNC_TICK);
+        // Cocoa normally keeps this flag once it has been enabled. Re-enumerating every
+        // window at 60 Hz after each focus change made secondary viewports stutter.
+        if focus_changed {
+            mac_window::enable_mouse_move_events_for_all_windows(true);
         }
     }
 }
@@ -528,10 +510,19 @@ impl eframe::App for DownloaderApp {
             self.settings_ui.open_settings();
         }
         if mac_menu::take_open_logs_request() {
-            self.log_ui.open_logs();
+            if let Ok(mut state) = self.log_ui.lock() {
+                state.open_logs();
+            }
         }
         if mac_menu::take_open_speed_test_request() {
-            self.speed_test_ui.open_speed_test();
+            if let Ok(mut state) = self.speed_test_ui.lock() {
+                state.open_speed_test();
+            }
+        }
+        if mac_menu::take_open_stream_request() {
+            if let Ok(mut state) = self.stream_ui.lock() {
+                state.open_stream();
+            }
         }
         self.current_window_size = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.size()));
         if let Some(size) = self.pending_window_resize.take() {
@@ -548,19 +539,27 @@ impl eframe::App for DownloaderApp {
                 self.did_snap = true;
             }
         }
-        self.settings_ui.poll_tool_updates();
-        self.speed_test_ui.poll_updates();
-        self.settings_ui.auto_refresh_if_needed();
+        if let Ok(mut state) = self.speed_test_ui.lock() {
+            state.poll_updates();
+        }
+        if let Ok(mut state) = self.stream_ui.lock() {
+            state.poll_updates();
+        }
+        settings_ui::process_requests(self, &ctx);
         self.poll_input_mode_change();
         self.poll_download_events();
         self.refresh_downloads_if_needed();
         self.poll_search_results();
         self.submit_search_if_needed();
         ui::render(self, root_ui, frame);
-        speed_test_ui::render_speed_test_viewport(self, &ctx);
+        speed_test_ui::render_speed_test_viewport(&self.speed_test_ui, &ctx);
+        stream_ui::render_stream_viewport(&self.stream_ui, self.cookie_args.clone(), &ctx);
     }
 
     fn on_exit(&mut self) {
+        if let Ok(mut stream) = self.stream_ui.lock() {
+            stream.stop_all();
+        }
         let mut data = SettingsData::load();
         if let Some(size) = self.current_window_size {
             data.window_width = format_dimension(size.x.max(320.0));

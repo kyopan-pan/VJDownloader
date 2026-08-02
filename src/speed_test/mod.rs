@@ -1,11 +1,11 @@
 use eframe::egui;
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Instant;
 
-use crate::app::DownloaderApp;
 use crate::cursor::pointing;
+use crate::theme::paint_viewport_background;
 
 const TEST_URL: &str = "https://speed.cloudflare.com/__down?bytes=50000000";
 
@@ -95,12 +95,11 @@ impl Default for SpeedTestUiState {
     }
 }
 
-pub fn render_speed_test_viewport(app: &mut DownloaderApp, ctx: &egui::Context) {
-    if !app.speed_test_ui.show_speed_test {
+pub fn render_speed_test_viewport(state: &Arc<Mutex<SpeedTestUiState>>, ctx: &egui::Context) {
+    if !state.lock().is_ok_and(|state| state.show_speed_test) {
         return;
     }
 
-    let mut close_requested = false;
     let viewport_id = speed_test_viewport_id();
     let builder = egui::ViewportBuilder::default()
         .with_title("通信速度測定")
@@ -108,41 +107,25 @@ pub fn render_speed_test_viewport(app: &mut DownloaderApp, ctx: &egui::Context) 
         .with_min_inner_size(egui::vec2(420.0, 300.0))
         .with_always_on_top();
 
-    ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
+    let state = Arc::clone(state);
+    ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
+        paint_viewport_background(ui);
+        let ctx = ui.ctx().clone();
+        let Ok(mut state) = state.lock() else { return };
+        state.poll_updates();
         if ctx.input(|i| i.viewport().close_requested()) {
-            close_requested = true;
+            state.show_speed_test = false;
+            return;
         }
-
-        match class {
-            egui::ViewportClass::EmbeddedWindow => {
-                let mut open = true;
-                egui::Window::new("通信速度測定")
-                    .collapsible(false)
-                    .resizable(true)
-                    .default_width(500.0)
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        render_speed_test_contents(ui, app, ctx);
-                    });
-                if !open {
-                    close_requested = true;
-                }
-            }
-            _ => {
-                let content_ctx = ctx.clone();
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    render_speed_test_contents(ui, app, &content_ctx);
-                });
-            }
-        }
+        render_speed_test_contents(ui, &mut state, &ctx);
     });
-
-    if close_requested {
-        app.speed_test_ui.show_speed_test = false;
-    }
 }
 
-fn render_speed_test_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &egui::Context) {
+fn render_speed_test_contents(
+    ui: &mut egui::Ui,
+    state: &mut SpeedTestUiState,
+    ctx: &egui::Context,
+) {
     egui::Frame::NONE
         .inner_margin(egui::Margin {
             left: 16,
@@ -166,11 +149,11 @@ fn render_speed_test_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &
             );
             ui.add_space(14.0);
 
-            render_result_panel(ui, app, ctx);
+            render_result_panel(ui, state, ctx);
             ui.add_space(12.0);
 
             ui.horizontal(|ui| {
-                let label = if app.speed_test_ui.running {
+                let label = if state.running {
                     "測定中..."
                 } else {
                     "測定開始"
@@ -180,30 +163,29 @@ fn render_speed_test_contents(ui: &mut egui::Ui, app: &mut DownloaderApp, ctx: &
                         .size(13.0)
                         .color(egui::Color32::from_rgb(8, 14, 24)),
                 )
-                .fill(if app.speed_test_ui.running {
+                .fill(if state.running {
                     egui::Color32::from_rgb(148, 163, 184)
                 } else {
                     egui::Color32::from_rgb(56, 189, 248)
                 })
                 .corner_radius(egui::CornerRadius::same(12));
 
-                if pointing(ui.add_enabled(!app.speed_test_ui.running, button)).clicked() {
-                    app.speed_test_ui.start_test();
+                if pointing(ui.add_enabled(!state.running, button)).clicked() {
+                    state.start_test();
                 }
             });
         });
 }
 
-fn render_result_panel(ui: &mut egui::Ui, app: &DownloaderApp, ctx: &egui::Context) {
+fn render_result_panel(ui: &mut egui::Ui, state: &SpeedTestUiState, ctx: &egui::Context) {
     egui::Frame::NONE
         .fill(egui::Color32::from_rgb(20, 26, 40))
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78)))
         .corner_radius(egui::CornerRadius::same(16))
         .inner_margin(egui::Margin::symmetric(14, 14))
         .show(ui, |ui| {
-            if app.speed_test_ui.running {
-                let elapsed = app
-                    .speed_test_ui
+            if state.running {
+                let elapsed = state
                     .started_at
                     .map(|started| started.elapsed().as_secs_f32())
                     .unwrap_or(0.0);
@@ -217,7 +199,7 @@ fn render_result_panel(ui: &mut egui::Ui, app: &DownloaderApp, ctx: &egui::Conte
                 return;
             }
 
-            if let Some(err) = &app.speed_test_ui.error {
+            if let Some(err) = &state.error {
                 ui.label(
                     egui::RichText::new(err)
                         .size(12.5)
@@ -226,7 +208,7 @@ fn render_result_panel(ui: &mut egui::Ui, app: &DownloaderApp, ctx: &egui::Conte
                 return;
             }
 
-            let Some(result) = app.speed_test_ui.result.as_ref() else {
+            let Some(result) = state.result.as_ref() else {
                 ui.label(
                     egui::RichText::new("まだ測定していません。")
                         .size(12.5)

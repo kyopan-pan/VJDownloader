@@ -3,8 +3,8 @@ use eframe::emath::GuiRounding;
 
 use crate::app::DownloaderApp;
 use crate::cursor::pointing;
-use crate::log_ui;
-use crate::settings_ui;
+use crate::logs::ui as log_ui;
+use crate::settings::ui as settings_ui;
 
 const PANEL_MIN_WIDTH: f32 = 120.0;
 const DOWNLOAD_PANEL_MAX_RATIO: f32 = 0.5;
@@ -49,8 +49,8 @@ pub fn render(
     app.download_panel_width = download_panel.response.rect.width().max(1.0);
     app.search_panel_width = search_panel.response.rect.width().max(1.0);
 
-    settings_ui::render_windows(app, &ctx);
-    log_ui::render_log_viewport(app, &ctx);
+    settings_ui::render_windows(&app.settings_ui, &ctx);
+    log_ui::render_log_viewport(&app.log_ui, &app.status_logs, &ctx);
 }
 
 fn render_download_section(

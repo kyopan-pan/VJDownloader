@@ -98,7 +98,7 @@ pub fn update_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
 }
 
 // 実行可能な deno を探索し、yt-dlp に渡す runtime 指定文字列を返す。
-pub(super) fn js_runtime_arg() -> String {
+pub fn js_runtime_arg() -> String {
     match detect_deno_binary() {
         Some(path) => format!("deno:{}", path.to_string_lossy()),
         None => "deno".to_string(),

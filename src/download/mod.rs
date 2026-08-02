@@ -1,4 +1,4 @@
-mod animethemes;
+pub(crate) mod animethemes;
 mod process;
 mod staging;
 mod tools;
@@ -16,7 +16,7 @@ use crate::bundled::ensure_bundled_tools;
 use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{ffmpeg_path, yt_dlp_path};
 
-pub use tools::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
+pub use tools::{ensure_deno, ensure_yt_dlp, js_runtime_arg, update_deno, update_yt_dlp};
 
 pub enum DownloadEvent {
     Log(String),
@@ -173,23 +173,68 @@ impl ProcessTracker {
         }
     }
 
+    pub fn unregister(&self, pid: u32) {
+        if pid == 0 {
+            return;
+        }
+        let mut pids = self.pids.lock().unwrap();
+        pids.retain(|tracked| *tracked != pid);
+    }
+
     pub fn terminate_all(&self) {
         let pids = {
             let pids = self.pids.lock().unwrap();
             pids.clone()
         };
+        // 一時停止（SIGSTOP）中だと SIGTERM が配送されず終了処理が走らないため、
+        // 先に SIGCONT で再開させてから SIGTERM で穏やかに終了を促す。ffmpeg はこの過程で
+        // audiotoolbox 出力のオーディオキューを正常に停止・破棄するため、停止直後の音声ループを防げる。
+        for pid in &pids {
+            let _ = Command::new("kill")
+                .arg("-CONT")
+                .arg(pid.to_string())
+                .status();
+        }
         for pid in &pids {
             let _ = Command::new("kill")
                 .arg("-TERM")
                 .arg(pid.to_string())
                 .status();
         }
-        for pid in &pids {
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .arg(pid.to_string())
-                .status();
+        // SIGTERM 後の終了確認と SIGKILL での後始末は別スレッドで行い、呼び出し元（UI スレッド等）を
+        // ブロックしない。ffmpeg は SIGTERM 受信後すぐにオーディオキューを破棄して終了するため、
+        // 強制終了が必要になるのは応答しないプロセスだけ。
+        thread::spawn(move || {
+            for pid in &pids {
+                if !wait_for_exit(*pid, Duration::from_millis(2000)) {
+                    let _ = Command::new("kill")
+                        .arg("-KILL")
+                        .arg(pid.to_string())
+                        .status();
+                }
+            }
+        });
+    }
+}
+
+// 指定 pid が終了するまで最大 timeout だけ待つ。終了を確認できたら true を返す。
+// `kill -0` でプロセスの生存を確認する（シグナルは送らず存在判定のみ）。
+fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let alive = Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !alive {
+            return true;
         }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(20));
     }
 }
 

@@ -1,19 +1,15 @@
 mod app;
-mod app_logger;
 mod bundled;
 mod cursor;
 mod download;
 mod fs_utils;
-mod log_ui;
-mod mac_file_dialog;
-mod mac_input_source;
-mod mac_menu;
-mod mac_window;
+mod logs;
 mod paths;
+mod platform;
 mod search_index;
 mod settings;
-mod settings_ui;
-mod speed_test_ui;
+mod speed_test;
+mod stream;
 mod theme;
 mod ui;
 

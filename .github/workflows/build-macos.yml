@@ -42,9 +42,35 @@ jobs:
           echo "APP_VERSION=${APP_VERSION}" >> "${GITHUB_ENV}"
           echo "Detected version: ${APP_VERSION}"
 
-      # リリース用バイナリをビルド
+      # 公式 Syphon.framework を full Xcode でビルドして third_party/ へ配置
+      - name: Build Syphon.framework (Syphon同梱用ビルド)
+        run: |
+          set -euo pipefail
+          rm -rf syphon-src
+          git clone --depth 1 https://github.com/Syphon/Syphon-Framework.git syphon-src
+          cd syphon-src
+          xcodebuild \
+            -project Syphon.xcodeproj \
+            -target Syphon \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            SYMROOT="$PWD/build" \
+            build
+          FW=$(find "$PWD/build" -name "Syphon.framework" -type d | head -1)
+          if [ -z "${FW}" ]; then
+            echo "Syphon.framework のビルド成果物が見つかりません" >&2
+            exit 1
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/third_party"
+          rm -rf "${GITHUB_WORKSPACE}/third_party/Syphon.framework"
+          cp -R "${FW}" "${GITHUB_WORKSPACE}/third_party/"
+          echo "Vendored: ${GITHUB_WORKSPACE}/third_party/Syphon.framework"
+
+      # リリース用バイナリをビルド（Syphon 連携を有効化）
       - name: Build release binary (リリースビルド)
-        run: cargo build --release --locked
+        env:
+          SYPHON_FRAMEWORK_DIR: ${{ github.workspace }}/third_party
+        run: cargo build --release --locked --features syphon
 
       # Finder から直接起動できる .app バンドルを作成（Terminalを経由しない）
       - name: Create .app bundle (macOSアプリ化)
@@ -53,9 +79,12 @@ jobs:
           APP_DIR="dist/VJDownloader.app"
           mkdir -p "${APP_DIR}/Contents/MacOS"
           mkdir -p "${APP_DIR}/Contents/Resources"
+          mkdir -p "${APP_DIR}/Contents/Frameworks"
           cp target/release/VJDownloader "${APP_DIR}/Contents/MacOS/VJDownloader"
           cp assets/icon/App.icns "${APP_DIR}/Contents/Resources/App.icns"
           chmod +x "${APP_DIR}/Contents/MacOS/VJDownloader"
+          # Syphon.framework を同梱（バイナリの rpath: @executable_path/../Frameworks から解決）
+          cp -R third_party/Syphon.framework "${APP_DIR}/Contents/Frameworks/"
 
           cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
