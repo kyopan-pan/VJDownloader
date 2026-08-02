@@ -22,6 +22,8 @@ use crate::theme::paint_viewport_background;
 const MAX_FRAME_BUFFER: usize = 12;
 #[cfg(not(feature = "syphon"))]
 const MAX_FRAME_BUFFER: usize = 120;
+// ワーカースレッドと UI 間には数フレームだけ滞留させ、描画停止時は新しいフレームを捨てる。
+const FRAME_CHANNEL_CAPACITY: usize = 3;
 
 // 1 つの再生デッキ。A/B それぞれが独立した ffmpeg パイプラインと状態を持つ。
 struct StreamDeck {
@@ -46,7 +48,7 @@ struct StreamDeck {
     frame_buffer: VecDeque<StreamFrame>,
     tx: mpsc::Sender<StreamEvent>,
     rx: mpsc::Receiver<StreamEvent>,
-    frame_tx: mpsc::Sender<StreamFrame>,
+    frame_tx: mpsc::SyncSender<StreamFrame>,
     frame_rx: mpsc::Receiver<StreamFrame>,
     // マスター合成（Syphon配信）用に直近の提示フレームを保持する。
     #[cfg(feature = "syphon")]
@@ -56,7 +58,8 @@ struct StreamDeck {
 impl StreamDeck {
     fn new(label: &'static str, texture_name: &'static str) -> Self {
         let (tx, rx) = mpsc::channel();
-        let (frame_tx, frame_rx) = mpsc::channel();
+        // UI が一時的に描画されなくても、高解像度フレームを無制限に溜めない。
+        let (frame_tx, frame_rx) = mpsc::sync_channel(FRAME_CHANNEL_CAPACITY);
         Self {
             label,
             texture_name,
@@ -93,6 +96,16 @@ impl StreamDeck {
             return;
         };
 
+        // 新しい再生に必要な一時領域を先に確保する。ここで失敗しても、現在の
+        // 再生状態とプロセスは変更せず、そのまま継続できるようにする。
+        let cache_dir = match tempfile::Builder::new().prefix("vjstream-").tempdir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                self.error = Some(format!("一時キャッシュを作成できませんでした: {err}"));
+                return;
+            }
+        };
+
         self.cancel_cache();
         self.drain_frames();
         self.running = true;
@@ -106,14 +119,6 @@ impl StreamDeck {
 
         // 1デッキにつきキャッシュは1ファイルだけ保持する。古い動画のキャッシュは
         // TempDir の差し替え時に自動削除される。
-        let cache_dir = match tempfile::Builder::new().prefix("vjstream-").tempdir() {
-            Ok(dir) => dir,
-            Err(err) => {
-                self.running = false;
-                self.error = Some(format!("一時キャッシュを作成できませんでした: {err}"));
-                return;
-            }
-        };
         let cache_path = cache_dir.path().join("video.mp4");
         self.cache_dir = Some(cache_dir);
         self.cache_id += 1;
@@ -184,7 +189,8 @@ impl StreamDeck {
     // 再開時に現在位置から再起動する（シークと同じ仕組み）。正常終了時に ffmpeg が
     // オーディオキューを破棄するため、停止直後の音声ループが起きない。
     fn toggle_pause(&mut self) {
-        if !self.running {
+        // URL 解決中は再開に使える入力がまだないため、一時停止操作を受け付けない。
+        if !self.running || self.media_urls.is_empty() {
             return;
         }
         if self.paused {
@@ -195,11 +201,7 @@ impl StreamDeck {
             self.position_instant = None;
             // 旧プロセスの Finished イベントを無視するため世代を進めてから終了させる。
             self.run_id += 1;
-            if let Some(tracker) = self.tracker.as_ref() {
-                tracker.terminate_all();
-            }
-            self.cancel_flag = None;
-            self.tracker = None;
+            self.cancel_current_run();
             self.paused = true;
             self.drain_frames();
         }
@@ -208,8 +210,6 @@ impl StreamDeck {
     // 一時停止中の位置から ffmpeg を再起動して再生を再開する。
     fn resume_from_pause(&mut self) {
         if self.media_urls.is_empty() {
-            // URL 未解決などで再開できない場合は単に再生状態へ戻す。
-            self.paused = false;
             return;
         }
         let urls = self.media_urls.clone();
@@ -228,12 +228,8 @@ impl StreamDeck {
     // 再生を停止して状態を初期化する。
     fn stop(&mut self) {
         self.run_id += 1;
-        if let Some(tracker) = self.tracker.as_ref() {
-            tracker.terminate_all();
-        }
+        self.cancel_current_run();
         self.cancel_cache();
-        self.cancel_flag = None;
-        self.tracker = None;
         self.running = false;
         self.paused = false;
         self.texture = None;
@@ -263,12 +259,23 @@ impl StreamDeck {
         self.cache_dir = None;
     }
 
-    // 新しい再生世代を採番し、追跡用のフラグ/トラッカーを差し替える。
-    fn begin_run(&mut self) -> (u64, Arc<AtomicBool>, ProcessTracker) {
-        self.run_id += 1;
+    fn cancel_current_run(&mut self) {
+        // tracker 登録前（URL 解決中や spawn 直後）でも、後続処理が ffmpeg を
+        // 開始しないよう、プロセス終了より先にキャンセル状態を公開する。
+        if let Some(cancel) = self.cancel_flag.as_ref() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(tracker) = self.tracker.as_ref() {
             tracker.terminate_all();
         }
+        self.cancel_flag = None;
+        self.tracker = None;
+    }
+
+    // 新しい再生世代を採番し、追跡用のフラグ/トラッカーを差し替える。
+    fn begin_run(&mut self) -> (u64, Arc<AtomicBool>, ProcessTracker) {
+        self.run_id += 1;
+        self.cancel_current_run();
         let cancel = Arc::new(AtomicBool::new(false));
         let tracker = ProcessTracker::new();
         self.cancel_flag = Some(cancel.clone());

@@ -90,11 +90,11 @@ pub fn resolve_and_run(
     start_offset: f64,
     run_id: u64,
     tx: mpsc::Sender<StreamEvent>,
-    frame_tx: mpsc::Sender<StreamFrame>,
+    frame_tx: mpsc::SyncSender<StreamFrame>,
     cancel_flag: Arc<AtomicBool>,
     tracker: ProcessTracker,
 ) {
-    let (duration, urls) = match resolve_media(&url, &cookie_args) {
+    let (duration, urls) = match resolve_media(&url, &cookie_args, &cancel_flag, &tracker) {
         Ok(resolved) => resolved,
         Err(err) => {
             let _ = tx.send(StreamEvent::Finished {
@@ -182,10 +182,15 @@ fn cache_media(
     let child = cmd
         .spawn()
         .map_err(|err| format!("動画キャッシュの開始に失敗しました: {err}"))?;
+    let pid = child.id();
     tracker.register(&child);
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("動画キャッシュの終了待ちに失敗しました: {err}"))?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        tracker.terminate_all();
+    }
+    let wait_result = child.wait_with_output();
+    tracker.unregister(pid);
+    let output =
+        wait_result.map_err(|err| format!("動画キャッシュの終了待ちに失敗しました: {err}"))?;
     if cancel_flag.load(Ordering::Relaxed) {
         return Err("キャッシュ作成がキャンセルされました。".to_string());
     }
@@ -209,7 +214,7 @@ pub fn run_from_urls(
     start_offset: f64,
     run_id: u64,
     tx: mpsc::Sender<StreamEvent>,
-    frame_tx: mpsc::Sender<StreamFrame>,
+    frame_tx: mpsc::SyncSender<StreamFrame>,
     cancel_flag: Arc<AtomicBool>,
     tracker: ProcessTracker,
 ) {
@@ -226,7 +231,15 @@ pub fn run_from_urls(
 }
 
 // AnimeThemesは専用API/HTML解析、それ以外はyt-dlpで直リンクを取得する。
-fn resolve_media(url: &str, cookie_args: &[String]) -> Result<(Option<f64>, Vec<String>), String> {
+fn resolve_media(
+    url: &str,
+    cookie_args: &[String],
+    cancel_flag: &Arc<AtomicBool>,
+    tracker: &ProcessTracker,
+) -> Result<(Option<f64>, Vec<String>), String> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("URL解決がキャンセルされました。".to_string());
+    }
     if is_animethemes_url(url) {
         println!("[stream] AnimeThemes resolve start: {url}");
         let direct_url = crate::download::animethemes::resolve_direct_webm(url)?
@@ -235,6 +248,9 @@ fn resolve_media(url: &str, cookie_args: &[String]) -> Result<(Option<f64>, Vec<
             "[stream] AnimeThemes resolved: {}",
             summarize_media_url(&direct_url)
         );
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err("URL解決がキャンセルされました。".to_string());
+        }
         return Ok((None, vec![direct_url]));
     }
 
@@ -259,10 +275,22 @@ fn resolve_media(url: &str, cookie_args: &[String]) -> Result<(Option<f64>, Vec<
     cmd.arg("-g");
     cmd.arg(url);
     apply_bin_path(&mut cmd);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let output = cmd
-        .output()
+    let child = cmd
+        .spawn()
         .map_err(|err| format!("yt-dlpの起動に失敗しました: {err}"))?;
+    let pid = child.id();
+    tracker.register(&child);
+    if cancel_flag.load(Ordering::Relaxed) {
+        tracker.terminate_all();
+    }
+    let wait_result = child.wait_with_output();
+    tracker.unregister(pid);
+    let output = wait_result.map_err(|err| format!("yt-dlpの終了待ちに失敗しました: {err}"))?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("URL解決がキャンセルされました。".to_string());
+    }
     println!("[stream] yt-dlp exited: {}", output.status);
 
     if !output.status.success() {
@@ -326,7 +354,7 @@ fn run_ffmpeg(
     start_offset: f64,
     run_id: u64,
     tx: &mpsc::Sender<StreamEvent>,
-    frame_tx: &mpsc::Sender<StreamFrame>,
+    frame_tx: &mpsc::SyncSender<StreamFrame>,
     cancel_flag: &Arc<AtomicBool>,
     tracker: &ProcessTracker,
 ) -> Result<(), String> {
@@ -345,10 +373,78 @@ fn run_ffmpeg(
         PREVIEW_HEIGHT,
         PREVIEW_FPS
     );
-    let mut child = build_ffmpeg_command(&ffmpeg, urls, start_offset)
+    match run_ffmpeg_attempt(
+        &ffmpeg,
+        urls,
+        start_offset,
+        run_id,
+        tx,
+        frame_tx,
+        cancel_flag,
+        tracker,
+        true,
+    ) {
+        Err(FfmpegRunError::MissingAudioOutput) if !cancel_flag.load(Ordering::Relaxed) => {
+            println!("[stream] audio stream not found; retrying video-only playback");
+            run_ffmpeg_attempt(
+                &ffmpeg,
+                urls,
+                start_offset,
+                run_id,
+                tx,
+                frame_tx,
+                cancel_flag,
+                tracker,
+                false,
+            )
+            .map_err(FfmpegRunError::into_message)
+        }
+        result => result.map_err(FfmpegRunError::into_message),
+    }
+}
+
+enum FfmpegRunError {
+    MissingAudioOutput,
+    Other(String),
+}
+
+impl FfmpegRunError {
+    fn into_message(self) -> String {
+        match self {
+            Self::MissingAudioOutput => "音声ストリームを再生できませんでした。".to_string(),
+            Self::Other(message) => message,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_ffmpeg_attempt(
+    ffmpeg: &Path,
+    urls: &[String],
+    start_offset: f64,
+    run_id: u64,
+    tx: &mpsc::Sender<StreamEvent>,
+    frame_tx: &mpsc::SyncSender<StreamFrame>,
+    cancel_flag: &Arc<AtomicBool>,
+    tracker: &ProcessTracker,
+    include_audio: bool,
+) -> Result<(), FfmpegRunError> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+
+    let mut child = build_ffmpeg_command(ffmpeg, urls, start_offset, include_audio)
         .spawn()
-        .map_err(|err| format!("ffmpegの起動に失敗しました: {err}"))?;
+        .map_err(|err| FfmpegRunError::Other(format!("ffmpegの起動に失敗しました: {err}")))?;
+    let pid = child.id();
     tracker.register(&child);
+    // spawn と tracker 登録の間に停止された場合を回収する。
+    if cancel_flag.load(Ordering::Relaxed) {
+        tracker.terminate_all();
+        let _ = child.wait();
+        tracker.unregister(pid);
+        return Ok(());
+    }
 
     let (stderr_tx, stderr_rx) = mpsc::channel();
     let stderr_handle = if let Some(stderr) = child.stderr.take() {
@@ -368,15 +464,17 @@ fn run_ffmpeg(
     if receiver_closed || cancel_flag.load(Ordering::Relaxed) {
         tracker.terminate_all();
         let _ = child.wait();
+        tracker.unregister(pid);
         println!(
             "[stream] ffmpeg stopped by receiver/cancel: frames={frame_count}, receiver_closed={receiver_closed}"
         );
         return Ok(());
     }
 
-    let status = child
-        .wait()
-        .map_err(|err| format!("ffmpegの終了待ちに失敗しました: {err}"))?;
+    let wait_result = child.wait();
+    tracker.unregister(pid);
+    let status = wait_result
+        .map_err(|err| FfmpegRunError::Other(format!("ffmpegの終了待ちに失敗しました: {err}")))?;
     if let Some(handle) = stderr_handle {
         let _ = handle.join();
     }
@@ -386,12 +484,17 @@ fn run_ffmpeg(
         println!("[stream] ffmpeg stderr tail:\n{stderr_tail}");
     }
     if !status.success() {
+        if include_audio && stderr_tail.contains("does not contain any stream") {
+            return Err(FfmpegRunError::MissingAudioOutput);
+        }
         let detail = if stderr_tail.is_empty() {
             status.to_string()
         } else {
             format!("{status}: {stderr_tail}")
         };
-        return Err(format!("ffmpegが異常終了しました: {detail}"));
+        return Err(FfmpegRunError::Other(format!(
+            "ffmpegが異常終了しました: {detail}"
+        )));
     }
     if frame_count == 0 {
         let detail = if stderr_tail.is_empty() {
@@ -399,15 +502,20 @@ fn run_ffmpeg(
         } else {
             stderr_tail
         };
-        return Err(format!(
+        return Err(FfmpegRunError::Other(format!(
             "ffmpegから映像フレームを取得できませんでした: {detail}"
-        ));
+        )));
     }
     Ok(())
 }
 
 // プレビュー用 ffmpeg コマンドを組み立てる。
-fn build_ffmpeg_command(ffmpeg: &Path, urls: &[String], start_offset: f64) -> Command {
+fn build_ffmpeg_command(
+    ffmpeg: &Path,
+    urls: &[String],
+    start_offset: f64,
+    include_audio: bool,
+) -> Command {
     let video_filter = format!(
         "fps=30,scale={w}:{h}:force_original_aspect_ratio=decrease,\
          pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
@@ -426,6 +534,10 @@ fn build_ffmpeg_command(ffmpeg: &Path, urls: &[String], start_offset: f64) -> Co
 
     // 解決済みURLはffmpegのHTTPクライアントで直接入力する。
     for url in urls {
+        // AudioToolbox が再生速度を律速しない無音再生では入力側を実時間に制限する。
+        if !include_audio {
+            cmd.arg("-re");
+        }
         if url.starts_with("http://") || url.starts_with("https://") {
             cmd.arg("-reconnect")
                 .arg("1")
@@ -460,23 +572,24 @@ fn build_ffmpeg_command(ffmpeg: &Path, urls: &[String], start_offset: f64) -> Co
         .arg("rgba")
         .arg("-f")
         .arg("rawvideo")
-        .arg("pipe:1")
-        .arg("-map")
-        .arg(audio_input)
-        .arg("-f")
-        .arg("audiotoolbox")
-        .arg("-audio_device_index")
-        .arg("-1")
-        .arg("vjstream_audio")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg("pipe:1");
+    if include_audio {
+        cmd.arg("-map")
+            .arg(audio_input)
+            .arg("-f")
+            .arg("audiotoolbox")
+            .arg("-audio_device_index")
+            .arg("-1")
+            .arg("vjstream_audio");
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd
 }
 
 // ffmpeg の標準出力から固定サイズのRGBAフレームを読み出し、PTSを付けて送出する。
 fn read_frames<R: Read>(
     reader: R,
-    frame_tx: &mpsc::Sender<StreamFrame>,
+    frame_tx: &mpsc::SyncSender<StreamFrame>,
     run_id: u64,
     start_offset: f64,
 ) -> (u64, bool) {
@@ -493,9 +606,12 @@ fn read_frames<R: Read>(
                     size: [PREVIEW_WIDTH, PREVIEW_HEIGHT],
                     rgba: buf.clone(),
                 };
-                if frame_tx.send(frame).is_err() {
-                    receiver_closed = true;
-                    break;
+                match frame_tx.try_send(frame) {
+                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        receiver_closed = true;
+                        break;
+                    }
                 }
                 index += 1;
             }
@@ -639,5 +755,42 @@ fn apply_bin_path(command: &mut Command) {
     }
     if let Ok(joined) = std::env::join_paths(paths) {
         command.env("PATH", joined);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_only_command_is_realtime_and_has_no_audio_device_output() {
+        let command =
+            build_ffmpeg_command(Path::new("ffmpeg"), &["silent.mp4".to_string()], 0.0, false);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.iter().any(|arg| arg == "-re"));
+        assert!(!args.iter().any(|arg| arg == "audiotoolbox"));
+        assert!(!args.iter().any(|arg| arg == "vjstream_audio"));
+    }
+
+    #[test]
+    fn audio_command_keeps_audio_device_output() {
+        let command = build_ffmpeg_command(
+            Path::new("ffmpeg"),
+            &["with-audio.mp4".to_string()],
+            0.0,
+            true,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(!args.iter().any(|arg| arg == "-re"));
+        assert!(args.iter().any(|arg| arg == "audiotoolbox"));
+        assert!(args.iter().any(|arg| arg == "vjstream_audio"));
     }
 }

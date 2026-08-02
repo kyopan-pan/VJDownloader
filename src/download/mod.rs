@@ -173,6 +173,14 @@ impl ProcessTracker {
         }
     }
 
+    pub fn unregister(&self, pid: u32) {
+        if pid == 0 {
+            return;
+        }
+        let mut pids = self.pids.lock().unwrap();
+        pids.retain(|tracked| *tracked != pid);
+    }
+
     pub fn terminate_all(&self) {
         let pids = {
             let pids = self.pids.lock().unwrap();
