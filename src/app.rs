@@ -12,7 +12,7 @@ use crate::platform::menu as mac_menu;
 use crate::platform::window as mac_window;
 use crate::search_index::{SearchEngine, SearchHit, SearchRequest, SearchSort};
 use crate::settings::ui as settings_ui;
-use crate::settings::{SettingsData, save_settings};
+use crate::settings::{SettingsData, cookie_args_from_settings, save_settings};
 use crate::speed_test as speed_test_ui;
 use crate::speed_test::SpeedTestUiState;
 use crate::stream::ui as stream_ui;
@@ -75,7 +75,8 @@ pub struct DownloaderApp {
     pub(crate) rx: Option<mpsc::Receiver<DownloadEvent>>,
     pub(crate) last_scan: Instant,
     pub(crate) refresh_needed: bool,
-    pub(crate) settings_ui: Arc<Mutex<settings_ui::SettingsUiState>>,
+    pub(crate) settings_ui: settings_ui::SettingsUiHandle,
+    pub(crate) cookie_args: Vec<String>,
     pub(crate) log_ui: Arc<Mutex<LogUiState>>,
     pub(crate) speed_test_ui: Arc<Mutex<SpeedTestUiState>>,
     pub(crate) stream_ui: Arc<Mutex<StreamUiState>>,
@@ -150,7 +151,8 @@ impl DownloaderApp {
             rx: None,
             last_scan: Instant::now() - Duration::from_secs(5),
             refresh_needed: true,
-            settings_ui: Arc::new(Mutex::new(settings_ui::SettingsUiState::new())),
+            settings_ui: settings_ui::SettingsUiHandle::new(),
+            cookie_args: cookie_args_from_settings(&settings),
             log_ui: Arc::new(Mutex::new(LogUiState::new())),
             speed_test_ui: Arc::new(Mutex::new(SpeedTestUiState::new())),
             stream_ui: Arc::new(Mutex::new(StreamUiState::new())),
@@ -212,18 +214,12 @@ impl DownloaderApp {
                 "初回セットアップが必要です。設定から自動セットアップを行ってください。"
                     .to_string(),
             );
-            if let Ok(mut settings) = self.settings_ui.lock() {
-                settings.open_initial_setup();
-            }
+            self.settings_ui.open_initial_setup();
             return;
         }
 
         let output_dir = self.download_dir.clone();
-        let cookie_args = self
-            .settings_ui
-            .lock()
-            .map(|settings| settings.cookie_args())
-            .unwrap_or_default();
+        let cookie_args = self.cookie_args.clone();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.download_in_progress = true;
@@ -511,9 +507,7 @@ impl eframe::App for DownloaderApp {
         let ctx = root_ui.ctx().clone();
         self.maintain_cursor_tracking(&ctx);
         if mac_menu::take_open_settings_request() {
-            if let Ok(mut settings) = self.settings_ui.lock() {
-                settings.open_settings();
-            }
+            self.settings_ui.open_settings();
         }
         if mac_menu::take_open_logs_request() {
             if let Ok(mut state) = self.log_ui.lock() {
@@ -545,17 +539,11 @@ impl eframe::App for DownloaderApp {
                 self.did_snap = true;
             }
         }
-        if let Ok(mut settings) = self.settings_ui.try_lock() {
-            settings.poll_tool_updates();
-        }
         if let Ok(mut state) = self.speed_test_ui.lock() {
             state.poll_updates();
         }
         if let Ok(mut state) = self.stream_ui.lock() {
             state.poll_updates();
-        }
-        if let Ok(mut settings) = self.settings_ui.try_lock() {
-            settings.auto_refresh_if_needed();
         }
         settings_ui::process_requests(self, &ctx);
         self.poll_input_mode_change();
@@ -565,12 +553,7 @@ impl eframe::App for DownloaderApp {
         self.submit_search_if_needed();
         ui::render(self, root_ui, frame);
         speed_test_ui::render_speed_test_viewport(&self.speed_test_ui, &ctx);
-        let cookie_args = self
-            .settings_ui
-            .try_lock()
-            .map(|settings| settings.cookie_args())
-            .unwrap_or_default();
-        stream_ui::render_stream_viewport(&self.stream_ui, cookie_args, &ctx);
+        stream_ui::render_stream_viewport(&self.stream_ui, self.cookie_args.clone(), &ctx);
     }
 
     fn on_exit(&mut self) {

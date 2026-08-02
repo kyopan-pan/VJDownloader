@@ -1,9 +1,9 @@
 use eframe::egui;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::app::DownloaderApp;
 use crate::cursor::pointing;
@@ -44,6 +44,25 @@ struct SettingsForm {
     error: Option<String>,
 }
 
+pub enum SettingsAction {
+    Save(SettingsData),
+    Reindex,
+}
+
+enum SettingsResult {
+    Saved(SettingsData),
+    Error(String),
+    Reindexed(Result<(), String>),
+}
+
+pub struct SettingsUiHandle {
+    state: Arc<Mutex<SettingsUiState>>,
+    settings_visible: Arc<AtomicBool>,
+    initial_setup_visible: Arc<AtomicBool>,
+    action_rx: mpsc::Receiver<SettingsAction>,
+    result_tx: mpsc::Sender<SettingsResult>,
+}
+
 impl SettingsForm {
     fn load() -> Self {
         let data = SettingsData::load();
@@ -61,55 +80,74 @@ impl SettingsForm {
 }
 
 pub struct SettingsUiState {
-    pub show_settings: bool,
-    pub show_initial_setup: bool,
     form: SettingsForm,
     yt_dlp: ToolState,
     deno: ToolState,
     tool_tx: mpsc::Sender<ToolUpdate>,
     tool_rx: mpsc::Receiver<ToolUpdate>,
-    last_auto_refresh: Instant,
     chrome_profiles: Vec<ChromeProfile>,
-    save_requested: bool,
-    reindex_requested: bool,
+    action_tx: mpsc::Sender<SettingsAction>,
+    result_rx: mpsc::Receiver<SettingsResult>,
+}
+
+impl SettingsUiHandle {
+    pub fn new() -> Self {
+        let (tool_tx, tool_rx) = mpsc::channel();
+        let (action_tx, action_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let yt_dlp = ToolState::from_disk(ToolKind::YtDlp);
+        let needs_initial_setup = !yt_dlp.available;
+        let deno = ToolState::from_disk(ToolKind::Deno);
+        let handle = Self {
+            state: Arc::new(Mutex::new(SettingsUiState {
+                form: SettingsForm::load(),
+                yt_dlp,
+                deno,
+                tool_tx,
+                tool_rx,
+                chrome_profiles: load_chrome_profiles(),
+                action_tx,
+                result_rx,
+            })),
+            settings_visible: Arc::new(AtomicBool::new(false)),
+            initial_setup_visible: Arc::new(AtomicBool::new(needs_initial_setup)),
+            action_rx,
+            result_tx,
+        };
+        if let Ok(mut settings) = handle.state.lock() {
+            settings.refresh_all_tools();
+        }
+        handle
+    }
+
+    pub fn open_settings(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.open_settings();
+        }
+        self.settings_visible.store(true, Ordering::Release);
+    }
+
+    pub fn open_initial_setup(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.refresh_all_tools();
+        }
+        self.initial_setup_visible.store(true, Ordering::Release);
+    }
+
+    pub fn try_recv_action(&self) -> Result<SettingsAction, mpsc::TryRecvError> {
+        self.action_rx.try_recv()
+    }
+
+    fn send_result(&self, result: SettingsResult) {
+        let _ = self.result_tx.send(result);
+    }
 }
 
 impl SettingsUiState {
-    pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
-        let yt_dlp = ToolState::from_disk(ToolKind::YtDlp);
-        let deno = ToolState::from_disk(ToolKind::Deno);
-        let mut state = Self {
-            show_settings: false,
-            show_initial_setup: !yt_dlp.available,
-            form: SettingsForm::load(),
-            yt_dlp,
-            deno,
-            tool_tx: tx,
-            tool_rx: rx,
-            last_auto_refresh: Instant::now() - Duration::from_secs(10),
-            chrome_profiles: load_chrome_profiles(),
-            save_requested: false,
-            reindex_requested: false,
-        };
-        state.refresh_all_tools();
-        state
-    }
-
-    pub fn open_settings(&mut self) {
+    fn open_settings(&mut self) {
         self.form = SettingsForm::load();
-        self.show_settings = true;
         self.chrome_profiles = load_chrome_profiles();
         self.refresh_all_tools();
-    }
-
-    pub fn open_initial_setup(&mut self) {
-        self.show_initial_setup = true;
-        self.refresh_all_tools();
-    }
-
-    pub fn cookie_args(&self) -> Vec<String> {
-        cookie_args_from_settings(&self.form.data)
     }
 
     pub fn poll_tool_updates(&mut self) {
@@ -121,13 +159,18 @@ impl SettingsUiState {
         }
     }
 
-    pub fn auto_refresh_if_needed(&mut self) {
-        if (self.yt_dlp.available && self.deno.available) || self.yt_dlp.busy || self.deno.busy {
-            return;
-        }
-        if self.last_auto_refresh.elapsed() >= Duration::from_secs(5) {
-            self.refresh_all_tools();
-            self.last_auto_refresh = Instant::now();
+    fn poll_results(&mut self) {
+        while let Ok(result) = self.result_rx.try_recv() {
+            match result {
+                SettingsResult::Saved(data) => {
+                    self.form.data = data.clone();
+                    self.form.last_saved_data = data;
+                    self.form.dirty = false;
+                    self.form.error = None;
+                }
+                SettingsResult::Error(error) => self.form.error = Some(error),
+                SettingsResult::Reindexed(result) => self.form.error = result.err(),
+            }
         }
     }
 
@@ -264,9 +307,7 @@ pub fn render_toolbar(
     ctx: &egui::Context,
 ) {
     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
-        if let Ok(mut settings) = app.settings_ui.lock() {
-            settings.open_settings();
-        }
+        app.settings_ui.open_settings();
     }
     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::L)) {
         if let Ok(mut state) = app.log_ui.lock() {
@@ -276,20 +317,20 @@ pub fn render_toolbar(
 }
 
 pub fn render_windows(
-    state: &Arc<Mutex<SettingsUiState>>,
+    handle: &SettingsUiHandle,
     // ビューポート描画の起点となるコンテキスト
     ctx: &egui::Context,
 ) {
-    render_initial_setup_viewport(state, ctx);
-    render_settings_viewport(state, ctx);
+    render_initial_setup_viewport(handle, ctx);
+    render_settings_viewport(handle, ctx);
 }
 
 fn render_initial_setup_viewport(
-    state: &Arc<Mutex<SettingsUiState>>,
+    handle: &SettingsUiHandle,
     // ビューポート表示に使うコンテキスト
     ctx: &egui::Context,
 ) {
-    if !state.try_lock().is_ok_and(|state| state.show_initial_setup) {
+    if !handle.initial_setup_visible.load(Ordering::Acquire) {
         return;
     }
 
@@ -300,27 +341,27 @@ fn render_initial_setup_viewport(
         .with_resizable(false)
         .with_always_on_top();
 
-    let state = Arc::clone(state);
+    let state = Arc::clone(&handle.state);
+    let initial_setup_visible = Arc::clone(&handle.initial_setup_visible);
+    let settings_visible = Arc::clone(&handle.settings_visible);
     ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
         paint_viewport_background(ui);
         let Ok(mut state) = state.lock() else { return };
         if ui.ctx().input(|i| i.viewport().close_requested()) {
-            state.show_initial_setup = false;
+            initial_setup_visible.store(false, Ordering::Release);
             return;
         }
         state.poll_tool_updates();
+        state.poll_results();
         if render_initial_setup_contents(ui, &mut state) {
+            settings_visible.store(true, Ordering::Release);
             ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
         }
     });
 }
 
-fn render_settings_viewport(
-    state: &Arc<Mutex<SettingsUiState>>,
-    // ビューポート表示に使うコンテキスト
-    ctx: &egui::Context,
-) {
-    if !state.try_lock().is_ok_and(|state| state.show_settings) {
+fn render_settings_viewport(handle: &SettingsUiHandle, ctx: &egui::Context) {
+    if !handle.settings_visible.load(Ordering::Acquire) {
         return;
     }
 
@@ -331,19 +372,18 @@ fn render_settings_viewport(
         .with_resizable(false)
         .with_always_on_top();
 
-    let state = Arc::clone(state);
+    let state = Arc::clone(&handle.state);
+    let settings_visible = Arc::clone(&handle.settings_visible);
     ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
         paint_viewport_background(ui);
         let Ok(mut state) = state.lock() else { return };
         if ui.ctx().input(|i| i.viewport().close_requested()) {
-            state.show_settings = false;
+            settings_visible.store(false, Ordering::Release);
             return;
         }
         state.poll_tool_updates();
+        state.poll_results();
         render_settings_contents(ui, &mut state);
-        if state.save_requested || state.reindex_requested {
-            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
-        }
     });
 }
 
@@ -459,7 +499,8 @@ fn render_settings_contents(
                         state.form.mark_changed();
                     }
                     if request_reindex {
-                        state.reindex_requested = true;
+                        let _ = state.action_tx.send(SettingsAction::Reindex);
+                        ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                     }
 
                     ui.add_space(12.0);
@@ -477,7 +518,10 @@ fn render_settings_contents(
                         let save = egui::Button::new("設定を保存")
                             .fill(egui::Color32::from_rgb(16, 190, 255));
                         if pointing(ui.add_enabled(state.form.dirty, save)).clicked() {
-                            state.save_requested = true;
+                            let _ = state
+                                .action_tx
+                                .send(SettingsAction::Save(state.form.data.clone()));
+                            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
                         }
                         if state.form.dirty {
                             ui.label("未保存の変更があります");
@@ -1004,13 +1048,13 @@ fn add_text_input(
     .inner
 }
 
-fn apply_settings_changes(
-    state: &mut SettingsUiState,
-    download_dir: &mut PathBuf,
-    refresh_needed: &mut bool,
-    pending_resize: &mut Option<egui::Vec2>,
-) -> Result<(), String> {
-    let mut data = state.form.data.clone();
+struct AppliedSettings {
+    data: SettingsData,
+    download_dir: PathBuf,
+    window_size: egui::Vec2,
+}
+
+fn apply_settings_changes(mut data: SettingsData) -> Result<AppliedSettings, String> {
     let width = parse_dimension_input(&data.window_width)
         .ok_or_else(|| "画面の幅/高さは数値で入力してください。".to_string())?;
     let height = parse_dimension_input(&data.window_height)
@@ -1038,55 +1082,55 @@ fn apply_settings_changes(
     data.search_roots = normalize_search_roots(&data.search_roots)?;
     save_settings(&data)?;
 
-    state.form.data = data;
-    *download_dir = actual_dir;
-    *refresh_needed = true;
-    *pending_resize = Some(egui::vec2(width, height));
-    Ok(())
+    Ok(AppliedSettings {
+        data,
+        download_dir: actual_dir,
+        window_size: egui::vec2(width, height),
+    })
 }
 
 pub fn process_requests(app: &mut DownloaderApp, ctx: &egui::Context) {
-    let settings_ui = Arc::clone(&app.settings_ui);
-    let Ok(mut state) = settings_ui.try_lock() else {
-        ctx.request_repaint_after(Duration::from_millis(16));
-        return;
-    };
+    while let Ok(action) = app.settings_ui.try_recv_action() {
+        match action {
+            SettingsAction::Reindex => {
+                let result = app.request_reindex_all();
+                app.settings_ui
+                    .send_result(SettingsResult::Reindexed(result));
+                ctx.request_repaint_of(settings_viewport_id());
+            }
+            SettingsAction::Save(data) => {
+                let previous_roots = SettingsData::load().search_roots;
+                let applied = match apply_settings_changes(data) {
+                    Ok(applied) => applied,
+                    Err(error) => {
+                        app.settings_ui.send_result(SettingsResult::Error(error));
+                        ctx.request_repaint_of(settings_viewport_id());
+                        continue;
+                    }
+                };
 
-    if state.reindex_requested {
-        state.reindex_requested = false;
-        state.form.error = app.request_reindex_all().err();
-    }
+                let roots = applied.data.search_roots.clone();
+                if roots != previous_roots {
+                    if let Err(error) = app.sync_search_roots(&roots) {
+                        app.settings_ui.send_result(SettingsResult::Error(format!(
+                            "検索対象フォルダの同期に失敗しました: {error}"
+                        )));
+                        ctx.request_repaint_of(settings_viewport_id());
+                        continue;
+                    }
+                    app.mark_search_dirty();
+                }
 
-    if !state.save_requested {
-        return;
-    }
-    state.save_requested = false;
-
-    let previous_roots = state.form.last_saved_data.search_roots.clone();
-    if let Err(err) = apply_settings_changes(
-        &mut state,
-        &mut app.download_dir,
-        &mut app.refresh_needed,
-        &mut app.pending_window_resize,
-    ) {
-        state.form.error = Some(err);
-        return;
-    }
-
-    let roots = state.form.data.search_roots.clone();
-    if roots != previous_roots {
-        if let Err(err) = app.sync_search_roots(&roots) {
-            state.form.last_saved_data = state.form.data.clone();
-            state.form.dirty = false;
-            state.form.error = Some(format!("検索対象フォルダの同期に失敗しました: {err}"));
-            return;
+                app.download_dir = applied.download_dir;
+                app.refresh_needed = true;
+                app.pending_window_resize = Some(applied.window_size);
+                app.cookie_args = cookie_args_from_settings(&applied.data);
+                app.settings_ui
+                    .send_result(SettingsResult::Saved(applied.data));
+                ctx.request_repaint_of(settings_viewport_id());
+            }
         }
-        app.mark_search_dirty();
     }
-
-    state.form.last_saved_data = state.form.data.clone();
-    state.form.dirty = false;
-    state.form.error = None;
 }
 
 fn normalize_search_roots(roots: &[String]) -> Result<Vec<String>, String> {
