@@ -75,7 +75,7 @@ pub struct DownloaderApp {
     pub(crate) rx: Option<mpsc::Receiver<DownloadEvent>>,
     pub(crate) last_scan: Instant,
     pub(crate) refresh_needed: bool,
-    pub(crate) settings_ui: settings_ui::SettingsUiState,
+    pub(crate) settings_ui: Arc<Mutex<settings_ui::SettingsUiState>>,
     pub(crate) log_ui: Arc<Mutex<LogUiState>>,
     pub(crate) speed_test_ui: Arc<Mutex<SpeedTestUiState>>,
     pub(crate) stream_ui: Arc<Mutex<StreamUiState>>,
@@ -97,7 +97,6 @@ pub struct DownloaderApp {
     search_dirty: bool,
     last_input_mode: Option<InputMode>,
     last_focus_state: Option<bool>,
-    cursor_resync_until: Option<Instant>,
 }
 
 impl DownloaderApp {
@@ -151,7 +150,7 @@ impl DownloaderApp {
             rx: None,
             last_scan: Instant::now() - Duration::from_secs(5),
             refresh_needed: true,
-            settings_ui: settings_ui::SettingsUiState::new(),
+            settings_ui: Arc::new(Mutex::new(settings_ui::SettingsUiState::new())),
             log_ui: Arc::new(Mutex::new(LogUiState::new())),
             speed_test_ui: Arc::new(Mutex::new(SpeedTestUiState::new())),
             stream_ui: Arc::new(Mutex::new(StreamUiState::new())),
@@ -173,7 +172,6 @@ impl DownloaderApp {
             search_dirty: true,
             last_input_mode: None,
             last_focus_state: None,
-            cursor_resync_until: None,
         };
 
         mac_menu::install_settings_menu();
@@ -214,12 +212,18 @@ impl DownloaderApp {
                 "初回セットアップが必要です。設定から自動セットアップを行ってください。"
                     .to_string(),
             );
-            self.settings_ui.open_initial_setup();
+            if let Ok(mut settings) = self.settings_ui.lock() {
+                settings.open_initial_setup();
+            }
             return;
         }
 
         let output_dir = self.download_dir.clone();
-        let cookie_args = self.settings_ui.cookie_args();
+        let cookie_args = self
+            .settings_ui
+            .lock()
+            .map(|settings| settings.cookie_args())
+            .unwrap_or_default();
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.download_in_progress = true;
@@ -490,41 +494,14 @@ impl DownloaderApp {
     }
 
     fn maintain_cursor_tracking(&mut self, ctx: &egui::Context) {
-        const CURSOR_RESYNC_WINDOW: Duration = Duration::from_millis(900);
-        const CURSOR_SYNC_TICK: Duration = Duration::from_millis(16);
-
         let focused = ctx.input(|i| i.focused);
-        let now = Instant::now();
-        let mut force_reset = false;
-
-        match self.last_focus_state {
-            Some(prev) if prev != focused => {
-                force_reset = true;
-                if focused {
-                    self.cursor_resync_until = Some(now + CURSOR_RESYNC_WINDOW);
-                }
-            }
-            None => {
-                force_reset = true;
-                if focused {
-                    self.cursor_resync_until = Some(now + CURSOR_RESYNC_WINDOW);
-                }
-            }
-            _ => {}
-        }
+        let focus_changed = self.last_focus_state != Some(focused);
         self.last_focus_state = Some(focused);
 
-        if self
-            .cursor_resync_until
-            .is_some_and(|deadline| deadline <= now)
-        {
-            self.cursor_resync_until = None;
-        }
-
-        let should_poll = self.cursor_resync_until.is_some();
-        mac_window::enable_mouse_move_events_for_all_windows(force_reset || should_poll);
-        if should_poll {
-            ctx.request_repaint_after(CURSOR_SYNC_TICK);
+        // Cocoa normally keeps this flag once it has been enabled. Re-enumerating every
+        // window at 60 Hz after each focus change made secondary viewports stutter.
+        if focus_changed {
+            mac_window::enable_mouse_move_events_for_all_windows(true);
         }
     }
 }
@@ -534,7 +511,9 @@ impl eframe::App for DownloaderApp {
         let ctx = root_ui.ctx().clone();
         self.maintain_cursor_tracking(&ctx);
         if mac_menu::take_open_settings_request() {
-            self.settings_ui.open_settings();
+            if let Ok(mut settings) = self.settings_ui.lock() {
+                settings.open_settings();
+            }
         }
         if mac_menu::take_open_logs_request() {
             if let Ok(mut state) = self.log_ui.lock() {
@@ -566,14 +545,19 @@ impl eframe::App for DownloaderApp {
                 self.did_snap = true;
             }
         }
-        self.settings_ui.poll_tool_updates();
+        if let Ok(mut settings) = self.settings_ui.try_lock() {
+            settings.poll_tool_updates();
+        }
         if let Ok(mut state) = self.speed_test_ui.lock() {
             state.poll_updates();
         }
         if let Ok(mut state) = self.stream_ui.lock() {
             state.poll_updates();
         }
-        self.settings_ui.auto_refresh_if_needed();
+        if let Ok(mut settings) = self.settings_ui.try_lock() {
+            settings.auto_refresh_if_needed();
+        }
+        settings_ui::process_requests(self, &ctx);
         self.poll_input_mode_change();
         self.poll_download_events();
         self.refresh_downloads_if_needed();
@@ -581,7 +565,12 @@ impl eframe::App for DownloaderApp {
         self.submit_search_if_needed();
         ui::render(self, root_ui, frame);
         speed_test_ui::render_speed_test_viewport(&self.speed_test_ui, &ctx);
-        stream_ui::render_stream_viewport(&self.stream_ui, self.settings_ui.cookie_args(), &ctx);
+        let cookie_args = self
+            .settings_ui
+            .try_lock()
+            .map(|settings| settings.cookie_args())
+            .unwrap_or_default();
+        stream_ui::render_stream_viewport(&self.stream_ui, cookie_args, &ctx);
     }
 
     fn on_exit(&mut self) {

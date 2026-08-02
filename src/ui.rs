@@ -49,7 +49,7 @@ pub fn render(
     app.download_panel_width = download_panel.response.rect.width().max(1.0);
     app.search_panel_width = search_panel.response.rect.width().max(1.0);
 
-    settings_ui::render_windows(app, &ctx);
+    settings_ui::render_windows(&app.settings_ui, &ctx);
     log_ui::render_log_viewport(&app.log_ui, &app.status_logs, &ctx);
 }
 

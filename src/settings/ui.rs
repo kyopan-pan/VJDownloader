@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use crate::platform::file_dialog as mac_file_dialog;
 use crate::settings::{
     ChromeProfile, SettingsData, cookie_args_from_settings, load_chrome_profiles, save_settings,
 };
+use crate::theme::paint_viewport_background;
 
 #[derive(Clone, Copy, Debug)]
 enum ToolKind {
@@ -39,7 +40,7 @@ struct ToolUpdate {
 struct SettingsForm {
     data: SettingsData,
     last_saved_data: SettingsData,
-    last_failed_data: Option<SettingsData>,
+    dirty: bool,
     error: Option<String>,
 }
 
@@ -49,9 +50,13 @@ impl SettingsForm {
         Self {
             data: data.clone(),
             last_saved_data: data,
-            last_failed_data: None,
+            dirty: false,
             error: None,
         }
+    }
+
+    fn mark_changed(&mut self) {
+        self.dirty = true;
     }
 }
 
@@ -65,6 +70,8 @@ pub struct SettingsUiState {
     tool_rx: mpsc::Receiver<ToolUpdate>,
     last_auto_refresh: Instant,
     chrome_profiles: Vec<ChromeProfile>,
+    save_requested: bool,
+    reindex_requested: bool,
 }
 
 impl SettingsUiState {
@@ -82,6 +89,8 @@ impl SettingsUiState {
             tool_rx: rx,
             last_auto_refresh: Instant::now() - Duration::from_secs(10),
             chrome_profiles: load_chrome_profiles(),
+            save_requested: false,
+            reindex_requested: false,
         };
         state.refresh_all_tools();
         state
@@ -255,7 +264,9 @@ pub fn render_toolbar(
     ctx: &egui::Context,
 ) {
     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
-        app.settings_ui.open_settings();
+        if let Ok(mut settings) = app.settings_ui.lock() {
+            settings.open_settings();
+        }
     }
     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::L)) {
         if let Ok(mut state) = app.log_ui.lock() {
@@ -265,26 +276,23 @@ pub fn render_toolbar(
 }
 
 pub fn render_windows(
-    // 表示フラグを持つアプリ状態
-    app: &mut DownloaderApp,
+    state: &Arc<Mutex<SettingsUiState>>,
     // ビューポート描画の起点となるコンテキスト
     ctx: &egui::Context,
 ) {
-    render_initial_setup_viewport(app, ctx);
-    render_settings_viewport(app, ctx);
+    render_initial_setup_viewport(state, ctx);
+    render_settings_viewport(state, ctx);
 }
 
 fn render_initial_setup_viewport(
-    // 初回セットアップ表示フラグと状態を持つアプリ
-    app: &mut DownloaderApp,
+    state: &Arc<Mutex<SettingsUiState>>,
     // ビューポート表示に使うコンテキスト
     ctx: &egui::Context,
 ) {
-    if !app.settings_ui.show_initial_setup {
+    if !state.try_lock().is_ok_and(|state| state.show_initial_setup) {
         return;
     }
 
-    let mut close_requested = false;
     let viewport_id = initial_setup_viewport_id();
     let builder = egui::ViewportBuilder::default()
         .with_title("初回セットアップ")
@@ -292,50 +300,30 @@ fn render_initial_setup_viewport(
         .with_resizable(false)
         .with_always_on_top();
 
-    ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
-        if ctx.input(|i| i.viewport().close_requested()) {
-            close_requested = true;
+    let state = Arc::clone(state);
+    ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
+        paint_viewport_background(ui);
+        let Ok(mut state) = state.lock() else { return };
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            state.show_initial_setup = false;
+            return;
         }
-
-        match class {
-            egui::ViewportClass::EmbeddedWindow => {
-                let mut open = true;
-                egui::Window::new("初回セットアップ")
-                    .collapsible(false)
-                    .resizable(false)
-                    .default_width(560.0)
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        render_initial_setup_contents(ui, app);
-                    });
-                if !open {
-                    close_requested = true;
-                }
-            }
-            _ => {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    render_initial_setup_contents(ui, app);
-                });
-            }
+        state.poll_tool_updates();
+        if render_initial_setup_contents(ui, &mut state) {
+            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
         }
     });
-
-    if close_requested {
-        app.settings_ui.show_initial_setup = false;
-    }
 }
 
 fn render_settings_viewport(
-    // 設定画面の表示フラグと状態を持つアプリ
-    app: &mut DownloaderApp,
+    state: &Arc<Mutex<SettingsUiState>>,
     // ビューポート表示に使うコンテキスト
     ctx: &egui::Context,
 ) {
-    if !app.settings_ui.show_settings {
+    if !state.try_lock().is_ok_and(|state| state.show_settings) {
         return;
     }
 
-    let mut close_requested = false;
     let viewport_id = settings_viewport_id();
     let builder = egui::ViewportBuilder::default()
         .with_title("設定")
@@ -343,45 +331,28 @@ fn render_settings_viewport(
         .with_resizable(false)
         .with_always_on_top();
 
-    ctx.show_viewport_immediate(viewport_id, builder, |ctx, class| {
-        if ctx.input(|i| i.viewport().close_requested()) {
-            close_requested = true;
+    let state = Arc::clone(state);
+    ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
+        paint_viewport_background(ui);
+        let Ok(mut state) = state.lock() else { return };
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            state.show_settings = false;
+            return;
         }
-
-        match class {
-            egui::ViewportClass::EmbeddedWindow => {
-                let mut open = true;
-                egui::Window::new("設定")
-                    .collapsible(false)
-                    .resizable(false)
-                    .default_width(620.0)
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        render_settings_contents(ui, app);
-                    });
-                if !open {
-                    close_requested = true;
-                }
-            }
-            _ => {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    render_settings_contents(ui, app);
-                });
-            }
+        state.poll_tool_updates();
+        render_settings_contents(ui, &mut state);
+        if state.save_requested || state.reindex_requested {
+            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
         }
     });
-
-    if close_requested {
-        app.settings_ui.show_settings = false;
-    }
 }
 
 fn render_initial_setup_contents(
     // 初回セットアップ画面の描画先
     ui: &mut egui::Ui,
-    // ツールの状態や操作を持つアプリ
-    app: &mut DownloaderApp,
-) {
+    state: &mut SettingsUiState,
+) -> bool {
+    let mut opened_settings = false;
     egui::Frame::NONE
         .inner_margin(egui::Margin {
             left: 16,
@@ -408,14 +379,14 @@ fn render_initial_setup_contents(
 
             render_tool_card(
                 ui,
-                &mut app.settings_ui,
+                state,
                 ToolKind::YtDlp,
                 ToolAction::Install,
             );
             ui.add_space(8.0);
             render_tool_card(
                 ui,
-                &mut app.settings_ui,
+                state,
                 ToolKind::Deno,
                 ToolAction::Install,
             );
@@ -429,18 +400,20 @@ fn render_initial_setup_contents(
                     )
                     .fill(egui::Color32::from_rgb(26, 34, 52));
                     if pointing(ui.add(open_btn)).clicked() {
-                        app.settings_ui.open_settings();
+                        state.open_settings();
+                        opened_settings = true;
                     }
                 });
             });
         });
+
+    opened_settings
 }
 
 fn render_settings_contents(
     // 設定画面の描画先
     ui: &mut egui::Ui,
-    // 設定値・ツール状態を保持するアプリ
-    app: &mut DownloaderApp,
+    state: &mut SettingsUiState,
 ) {
     egui::Frame::NONE
         .inner_margin(egui::Margin {
@@ -474,30 +447,44 @@ fn render_settings_contents(
                     );
                     ui.add_space(10.0);
 
-                    render_window_section(ui, &mut app.settings_ui);
+                    let mut settings_changed =
+                        render_window_section(ui, state);
                     ui.add_space(10.0);
-                    render_cookie_section(ui, &mut app.settings_ui);
+                    settings_changed |= render_cookie_section(ui, state);
                     ui.add_space(10.0);
-                    let request_reindex = render_search_roots_section(ui, &mut app.settings_ui);
+                    let (request_reindex, search_roots_changed) =
+                        render_search_roots_section(ui, state);
+                    settings_changed |= search_roots_changed;
+                    if settings_changed {
+                        state.form.mark_changed();
+                    }
                     if request_reindex {
-                        if let Err(err) = app.request_reindex_all() {
-                            app.settings_ui.form.error = Some(err);
-                        } else {
-                            app.settings_ui.form.error = None;
-                        }
+                        state.reindex_requested = true;
                     }
 
                     ui.add_space(12.0);
                     render_tool_card(
                         ui,
-                        &mut app.settings_ui,
+                        state,
                         ToolKind::YtDlp,
                         ToolAction::Update,
                     );
                     ui.add_space(8.0);
-                    render_tool_card(ui, &mut app.settings_ui, ToolKind::Deno, ToolAction::Update);
+                    render_tool_card(ui, state, ToolKind::Deno, ToolAction::Update);
 
-                    if let Some(err) = &app.settings_ui.form.error {
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let save = egui::Button::new("設定を保存")
+                            .fill(egui::Color32::from_rgb(16, 190, 255));
+                        if pointing(ui.add_enabled(state.form.dirty, save)).clicked() {
+                            state.save_requested = true;
+                        }
+                        if state.form.dirty {
+                            ui.label("未保存の変更があります");
+                        }
+                    });
+
+                    if let Some(err) = &state.form.error {
                         ui.add_space(8.0);
                         ui.label(
                             egui::RichText::new(err)
@@ -509,8 +496,6 @@ fn render_settings_contents(
                     ui.add_space(4.0);
                 });
         });
-
-    auto_save_settings_if_changed(app);
 }
 
 fn initial_setup_viewport_id() -> egui::ViewportId {
@@ -526,7 +511,8 @@ fn render_window_section(
     ui: &mut egui::Ui,
     // 入力フォーム状態を保持する設定UI
     state: &mut SettingsUiState,
-) {
+) -> bool {
+    let mut changed = false;
     let panel_fill = egui::Color32::from_rgb(20, 26, 40);
     let panel_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78));
 
@@ -546,7 +532,9 @@ fn render_window_section(
                             .size(12.0)
                             .color(egui::Color32::from_rgb(150, 160, 180)),
                     );
-                    add_text_input(ui, &mut state.form.data.window_width, 120.0, "例: 320");
+                    changed |=
+                        add_text_input(ui, &mut state.form.data.window_width, 120.0, "例: 320")
+                            .changed();
                     ui.end_row();
 
                     ui.label(
@@ -554,7 +542,9 @@ fn render_window_section(
                             .size(12.0)
                             .color(egui::Color32::from_rgb(150, 160, 180)),
                     );
-                    add_text_input(ui, &mut state.form.data.window_height, 120.0, "例: 1000");
+                    changed |=
+                        add_text_input(ui, &mut state.form.data.window_height, 120.0, "例: 1000")
+                            .changed();
                     ui.end_row();
 
                     ui.label(
@@ -567,12 +557,13 @@ fn render_window_section(
                         let input_width = (ui.available_width() - 120.0).max(200.0);
                         let default_hint_path = default_download_dir();
                         let default_hint = default_hint_path.to_string_lossy();
-                        add_text_input(
+                        changed |= add_text_input(
                             ui,
                             &mut state.form.data.download_dir,
                             input_width,
                             default_hint.as_ref(),
-                        );
+                        )
+                        .changed();
                         let pick_btn = egui::Button::new(
                             egui::RichText::new("フォルダを選択")
                                 .size(11.5)
@@ -591,11 +582,17 @@ fn render_window_section(
                         }
                     });
                     if let Some(path) = selected_dir {
-                        state.form.data.download_dir = path.to_string_lossy().to_string();
+                        let selected = path.to_string_lossy().to_string();
+                        if state.form.data.download_dir != selected {
+                            state.form.data.download_dir = selected;
+                            changed = true;
+                        }
                     }
                     ui.end_row();
                 });
         });
+
+    changed
 }
 
 fn render_cookie_section(
@@ -603,7 +600,8 @@ fn render_cookie_section(
     ui: &mut egui::Ui,
     // Cookie関連の入力フォーム状態
     state: &mut SettingsUiState,
-) {
+) -> bool {
+    let mut changed = false;
     let panel_fill = egui::Color32::from_rgb(20, 26, 40);
     let panel_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78));
 
@@ -626,10 +624,11 @@ fn render_cookie_section(
                 .color(egui::Color32::from_rgb(140, 150, 170)),
             );
             ui.add_space(6.0);
-            let _ = pointing(ui.checkbox(
+            changed |= pointing(ui.checkbox(
                 &mut state.form.data.cookies_enabled,
                 "ブラウザのクッキーを使う（bot確認対策）",
-            ));
+            ))
+            .changed();
             ui.add_space(6.0);
 
             egui::Grid::new("cookies-grid")
@@ -643,9 +642,17 @@ fn render_cookie_section(
                     );
                     let browser_hint = "例: chrome / firefox / safari";
                     let browser_enabled = state.form.data.cookies_enabled;
-                    ui.add_enabled_ui(browser_enabled, |ui| {
-                        add_text_input(ui, &mut state.form.data.cookies_browser, 220.0, browser_hint);
-                    });
+                    changed |= ui
+                        .add_enabled_ui(browser_enabled, |ui| {
+                            add_text_input(
+                                ui,
+                                &mut state.form.data.cookies_browser,
+                                220.0,
+                                browser_hint,
+                            )
+                            .changed()
+                        })
+                        .inner;
                     ui.end_row();
 
                     ui.label(
@@ -655,18 +662,26 @@ fn render_cookie_section(
                     );
                     let profile_hint = "例: Default / Profile 1";
                     let profile_enabled = state.form.data.cookies_enabled;
-                    ui.add_enabled_ui(profile_enabled, |ui| {
-                        render_profile_input(ui, state, 220.0, profile_hint);
-                    });
+                    changed |= ui
+                        .add_enabled_ui(profile_enabled, |ui| {
+                            render_profile_input(ui, state, 220.0, profile_hint)
+                        })
+                        .inner;
                     ui.end_row();
                 });
         });
+
+    changed
 }
 
-fn render_profile_input(ui: &mut egui::Ui, state: &mut SettingsUiState, width: f32, hint: &str) {
+fn render_profile_input(
+    ui: &mut egui::Ui,
+    state: &mut SettingsUiState,
+    width: f32,
+    hint: &str,
+) -> bool {
     if state.chrome_profiles.is_empty() || !is_chrome_browser(&state.form.data.cookies_browser) {
-        add_text_input(ui, &mut state.form.data.cookies_profile, width, hint);
-        return;
+        return add_text_input(ui, &mut state.form.data.cookies_profile, width, hint).changed();
     }
 
     let selected_text = selected_chrome_profile_label(
@@ -674,40 +689,45 @@ fn render_profile_input(ui: &mut egui::Ui, state: &mut SettingsUiState, width: f
         &state.chrome_profiles,
         "指定なし",
     );
-    ui.add_sized([width, 36.0], |ui: &mut egui::Ui| {
-        egui::ComboBox::from_id_salt("chrome-profile-combo")
-            .width(width)
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
+    let mut changed = false;
+    egui::ComboBox::from_id_salt("chrome-profile-combo")
+        .width(width)
+        .selected_text(selected_text)
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(
                     &mut state.form.data.cookies_profile,
                     String::new(),
                     "指定なし",
-                );
-                for profile in &state.chrome_profiles {
-                    let label = chrome_profile_label(profile);
-                    ui.selectable_value(
+                )
+                .changed();
+            for profile in &state.chrome_profiles {
+                let label = chrome_profile_label(profile);
+                changed |= ui
+                    .selectable_value(
                         &mut state.form.data.cookies_profile,
                         profile.id.clone(),
                         label,
-                    );
-                }
-                let current = state.form.data.cookies_profile.trim().to_string();
-                if !current.is_empty()
-                    && !state
-                        .chrome_profiles
-                        .iter()
-                        .any(|profile| profile.id == current)
-                {
-                    ui.selectable_value(
+                    )
+                    .changed();
+            }
+            let current = state.form.data.cookies_profile.trim().to_string();
+            if !current.is_empty()
+                && !state
+                    .chrome_profiles
+                    .iter()
+                    .any(|profile| profile.id == current)
+            {
+                changed |= ui
+                    .selectable_value(
                         &mut state.form.data.cookies_profile,
                         current.clone(),
                         format!("{current}（現在の設定）"),
-                    );
-                }
-            })
-            .response
-    });
+                    )
+                    .changed();
+            }
+        });
+    changed
 }
 
 fn is_chrome_browser(browser: &str) -> bool {
@@ -742,12 +762,13 @@ fn chrome_profile_label(profile: &ChromeProfile) -> String {
     }
 }
 
-fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -> bool {
+fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -> (bool, bool) {
     let panel_fill = egui::Color32::from_rgb(20, 26, 40);
     let panel_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78));
     let mut should_reindex = false;
     let mut remove_index = None;
     let mut add_directory = None;
+    let mut changed = false;
 
     egui::Frame::NONE
         .fill(panel_fill)
@@ -832,16 +853,18 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
             .any(|existing| existing == &value)
         {
             state.form.data.search_roots.push(value);
+            changed = true;
         }
     }
 
     if let Some(index) = remove_index {
         if index < state.form.data.search_roots.len() {
             state.form.data.search_roots.remove(index);
+            changed = true;
         }
     }
 
-    should_reindex
+    (should_reindex, changed)
 }
 
 fn render_tool_card(
@@ -1022,42 +1045,48 @@ fn apply_settings_changes(
     Ok(())
 }
 
-fn auto_save_settings_if_changed(app: &mut DownloaderApp) {
-    let current = app.settings_ui.form.data.clone();
-    if current == app.settings_ui.form.last_saved_data {
+pub fn process_requests(app: &mut DownloaderApp, ctx: &egui::Context) {
+    let settings_ui = Arc::clone(&app.settings_ui);
+    let Ok(mut state) = settings_ui.try_lock() else {
+        ctx.request_repaint_after(Duration::from_millis(16));
         return;
-    }
-    if app.settings_ui.form.last_failed_data.as_ref() == Some(&current) {
-        return;
+    };
+
+    if state.reindex_requested {
+        state.reindex_requested = false;
+        state.form.error = app.request_reindex_all().err();
     }
 
-    let previous_roots = app.settings_ui.form.last_saved_data.search_roots.clone();
+    if !state.save_requested {
+        return;
+    }
+    state.save_requested = false;
+
+    let previous_roots = state.form.last_saved_data.search_roots.clone();
     if let Err(err) = apply_settings_changes(
-        &mut app.settings_ui,
+        &mut state,
         &mut app.download_dir,
         &mut app.refresh_needed,
         &mut app.pending_window_resize,
     ) {
-        app.settings_ui.form.last_failed_data = Some(current);
-        app.settings_ui.form.error = Some(err);
+        state.form.error = Some(err);
         return;
     }
 
-    let roots = app.settings_ui.form.data.search_roots.clone();
+    let roots = state.form.data.search_roots.clone();
     if roots != previous_roots {
         if let Err(err) = app.sync_search_roots(&roots) {
-            app.settings_ui.form.last_saved_data = app.settings_ui.form.data.clone();
-            app.settings_ui.form.last_failed_data = None;
-            app.settings_ui.form.error =
-                Some(format!("検索対象フォルダの同期に失敗しました: {err}"));
+            state.form.last_saved_data = state.form.data.clone();
+            state.form.dirty = false;
+            state.form.error = Some(format!("検索対象フォルダの同期に失敗しました: {err}"));
             return;
         }
         app.mark_search_dirty();
     }
 
-    app.settings_ui.form.last_saved_data = app.settings_ui.form.data.clone();
-    app.settings_ui.form.last_failed_data = None;
-    app.settings_ui.form.error = None;
+    state.form.last_saved_data = state.form.data.clone();
+    state.form.dirty = false;
+    state.form.error = None;
 }
 
 fn normalize_search_roots(roots: &[String]) -> Result<Vec<String>, String> {
