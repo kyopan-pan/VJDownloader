@@ -1,4 +1,4 @@
-mod animethemes;
+pub(crate) mod animethemes;
 mod process;
 mod staging;
 mod tools;

@@ -7,3 +7,5 @@ YtDownloader
 # CI で生成する Syphon フレームワークのビルド成果物
 /third_party
 /syphon-src
+
+.DS_Store

@@ -519,6 +519,13 @@ fn fetch_animethemes_direct_webm(
     fetch_animethemes_webm_via_html(url, tx)
 }
 
+// ストリーム再生でもダウンロードと同じ解決ロジックを利用する。
+// ログの受信側は不要だが、既存パイプラインと挙動を揃えるため内部チャネルへ流す。
+pub(crate) fn resolve_direct_webm(url: &str) -> Result<Option<String>, String> {
+    let (tx, _rx) = mpsc::channel();
+    fetch_animethemes_direct_webm(url, &tx)
+}
+
 fn fetch_animethemes_webm_via_api(
     page_url: &str,
     tx: &mpsc::Sender<DownloadEvent>,
@@ -668,6 +675,7 @@ struct AnimeThemesVideoCandidate {
     resolution: i64,
     source_priority: i64,
     tags: Option<String>,
+    entry_version: Option<i64>,
 }
 
 fn extract_animethemes_webm_from_json_api(value: &Value, theme_slug: &str) -> Option<String> {
@@ -696,7 +704,12 @@ fn extract_animethemes_webm_from_json_api(value: &Value, theme_slug: &str) -> Op
             };
             for video_id in relationship_ids(entry, "videos") {
                 if let Some(video) = find_jsonapi_resource(included, "video", &video_id) {
-                    if let Some(candidate) = parse_video_candidate(video) {
+                    let entry_version = entry
+                        .get("attributes")
+                        .unwrap_or(entry)
+                        .get("version")
+                        .and_then(Value::as_i64);
+                    if let Some(candidate) = parse_video_candidate(video, entry_version) {
                         candidates.push(candidate);
                     }
                 }
@@ -728,7 +741,8 @@ fn extract_animethemes_webm_from_nested_payload(value: &Value, theme_slug: &str)
             for entry in entries {
                 if let Some(videos) = entry.get("videos").and_then(Value::as_array) {
                     for video in videos {
-                        if let Some(candidate) = parse_video_candidate(video) {
+                        let entry_version = entry.get("version").and_then(Value::as_i64);
+                        if let Some(candidate) = parse_video_candidate(video, entry_version) {
                             candidates.push(candidate);
                         }
                     }
@@ -798,7 +812,10 @@ fn relationship_ids(resource: &Value, relation: &str) -> Vec<String> {
     }
 }
 
-fn parse_video_candidate(video: &Value) -> Option<AnimeThemesVideoCandidate> {
+fn parse_video_candidate(
+    video: &Value,
+    entry_version: Option<i64>,
+) -> Option<AnimeThemesVideoCandidate> {
     let attributes = video.get("attributes").unwrap_or(video);
     let link = attributes
         .get("link")
@@ -826,6 +843,7 @@ fn parse_video_candidate(video: &Value) -> Option<AnimeThemesVideoCandidate> {
         resolution,
         source_priority: source_priority(source),
         tags,
+        entry_version,
     })
 }
 
@@ -845,21 +863,28 @@ fn pick_best_video_link(candidates: Vec<AnimeThemesVideoCandidate>) -> Option<St
         .map(|candidate| candidate.link)
 }
 
-// ページURLの末尾（例: ED1-NCBD1080）には、テーマ名と動画タグが含まれる。
-// URL直コピー時に別バージョンを選ばないよう、タグ指定があれば完全一致を必須にする。
+// ページURLの末尾（例: OP1v5-NCBD1080）には、テーマ名・版・動画タグが含まれる。
+// URL直コピー時に別バージョンを選ばないよう、版とタグの両方を照合する。
 fn pick_video_link_for_page(
     candidates: Vec<AnimeThemesVideoCandidate>,
     page_theme_slug: &str,
 ) -> Option<String> {
+    let requested_version = requested_theme_version(page_theme_slug);
     let requested_tags = page_theme_slug
         .rsplit_once('-')
         .map(|(_, tags)| tags)
         .filter(|tags| !tags.is_empty());
 
+    let version_matches = candidates
+        .into_iter()
+        .filter(|candidate| match requested_version {
+            Some(version) => candidate.entry_version == Some(version),
+            None => candidate.entry_version.unwrap_or(1) == 1,
+        });
+
     match requested_tags {
         Some(requested_tags) => pick_best_video_link(
-            candidates
-                .into_iter()
+            version_matches
                 .filter(|candidate| {
                     candidate
                         .tags
@@ -869,8 +894,19 @@ fn pick_video_link_for_page(
                 })
                 .collect(),
         ),
-        None => pick_best_video_link(candidates),
+        None => pick_best_video_link(version_matches.collect()),
     }
+}
+
+// AnimeThemesでは v2 以降だけURLにバージョン番号が付き、v1は省略される。
+fn requested_theme_version(page_theme_slug: &str) -> Option<i64> {
+    let theme_identifier = page_theme_slug.split('-').next()?;
+    let version_separator = theme_identifier.rfind(['v', 'V'])?;
+    let digits = &theme_identifier[version_separator + 1..];
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn theme_matches_slug(theme: &Value, theme_slug: &str) -> bool {
@@ -1046,6 +1082,7 @@ mod tests {
                 {
                     "type": "animethemeentry",
                     "id": "16647",
+                    "attributes": { "version": 1 },
                     "relationships": {
                         "videos": { "data": [{ "type": "video", "id": "19396" }] }
                     }
@@ -1190,6 +1227,7 @@ mod tests {
                 {
                     "type": "animethemeentry",
                     "id": "16647",
+                    "attributes": { "version": 2 },
                     "relationships": {
                         "videos": { "data": [{ "type": "video", "id": "19396" }] }
                     }
@@ -1198,7 +1236,7 @@ mod tests {
                     "type": "video",
                     "id": "19396",
                     "attributes": {
-                        "link": "https://v.animethemes.moe/MeitanteiPrecure-OP1.webm",
+                        "link": "https://v.animethemes.moe/MeitanteiPrecure-OP1v2.webm",
                         "resolution": 720,
                         "source": "WEB"
                     }
@@ -1210,7 +1248,47 @@ mod tests {
             extract_animethemes_webm_from_api_json(json, "OP1v2").expect("api json should parse");
         assert_eq!(
             actual.as_deref(),
-            Some("https://v.animethemes.moe/MeitanteiPrecure-OP1.webm")
+            Some("https://v.animethemes.moe/MeitanteiPrecure-OP1v2.webm")
+        );
+    }
+
+    #[test]
+    fn selects_requested_entry_version_instead_of_last_matching_video() {
+        let json = r#"{
+            "anime": {
+                "animethemes": [
+                    {
+                        "slug": "OP1",
+                        "animethemeentries": [
+                            {
+                                "version": 5,
+                                "videos": [{
+                                    "link": "https://v.animethemes.moe/HunterHunter2011-OP1v5.webm",
+                                    "resolution": 1080,
+                                    "source": "BD",
+                                    "tags": "NCBD1080"
+                                }]
+                            },
+                            {
+                                "version": 6,
+                                "videos": [{
+                                    "link": "https://v.animethemes.moe/HunterHunter2011-OP1v6.webm",
+                                    "resolution": 1080,
+                                    "source": "BD",
+                                    "tags": "NCBD1080"
+                                }]
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let actual = extract_animethemes_webm_from_api_json(json, "OP1v5-NCBD1080")
+            .expect("api json should parse");
+        assert_eq!(
+            actual.as_deref(),
+            Some("https://v.animethemes.moe/HunterHunter2011-OP1v5.webm")
         );
     }
 

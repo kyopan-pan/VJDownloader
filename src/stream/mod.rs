@@ -36,6 +36,8 @@ const YOUTUBE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 const YOUTUBE_INPUT_HEADERS: &str = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n\
 Accept-Language: en-us,en;q=0.5\r\n\
 Sec-Fetch-Mode: navigate\r\n";
+const ANIMETHEMES_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+    AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 #[cfg(feature = "syphon")]
 const FORMAT_SELECTOR: &str = "bv*[height<=720]+ba/b[height<=720]/b";
@@ -60,6 +62,9 @@ pub enum StreamEvent {
     CacheFinished {
         cache_id: u64,
         result: Result<PathBuf, String>,
+    },
+    CacheSkipped {
+        cache_id: u64,
     },
 }
 
@@ -100,28 +105,41 @@ pub fn resolve_and_run(
         }
     };
 
+    if is_animethemes_url(&url) {
+        // yt-dlp標準出力から即時再生するため、完全取得キャッシュは作成しない。
+        let _ = tx.send(StreamEvent::CacheSkipped { cache_id });
+    } else {
+        // 初回再生と並行してローカルキャッシュを作る。キャッシュは再生世代とは
+        // 別の tracker/cancel_flag で管理し、ループ再起動時にも継続させる。
+        let cache_tx = tx.clone();
+        thread::spawn(move || {
+            let result = cache_media(
+                &url,
+                &cookie_args,
+                &cache_path,
+                &cache_cancel_flag,
+                &cache_tracker,
+            )
+            .map(|()| cache_path);
+            let _ = cache_tx.send(StreamEvent::CacheFinished { cache_id, result });
+        });
+    }
+
     let _ = tx.send(StreamEvent::Resolved {
         run_id,
         duration,
         urls: urls.clone(),
     });
 
-    // 初回再生と並行してローカルキャッシュを作る。キャッシュは再生世代とは
-    // 別の tracker/cancel_flag で管理し、ループ再起動時にも継続させる。
-    let cache_tx = tx.clone();
-    thread::spawn(move || {
-        let result = cache_media(
-            &url,
-            &cookie_args,
-            &cache_path,
-            &cache_cancel_flag,
-            &cache_tracker,
-        )
-        .map(|()| cache_path);
-        let _ = cache_tx.send(StreamEvent::CacheFinished { cache_id, result });
-    });
-
-    let result = run_ffmpeg(&urls, start_offset, run_id, &tx, &frame_tx, &cancel_flag, &tracker);
+    let result = run_ffmpeg(
+        &urls,
+        start_offset,
+        run_id,
+        &tx,
+        &frame_tx,
+        &cancel_flag,
+        &tracker,
+    );
     let _ = tx.send(StreamEvent::Finished { run_id, result });
 }
 
@@ -195,12 +213,31 @@ pub fn run_from_urls(
     cancel_flag: Arc<AtomicBool>,
     tracker: ProcessTracker,
 ) {
-    let result = run_ffmpeg(&urls, start_offset, run_id, &tx, &frame_tx, &cancel_flag, &tracker);
+    let result = run_ffmpeg(
+        &urls,
+        start_offset,
+        run_id,
+        &tx,
+        &frame_tx,
+        &cancel_flag,
+        &tracker,
+    );
     let _ = tx.send(StreamEvent::Finished { run_id, result });
 }
 
-// yt-dlp で総再生時間と直リンクを取得する。
+// AnimeThemesは専用API/HTML解析、それ以外はyt-dlpで直リンクを取得する。
 fn resolve_media(url: &str, cookie_args: &[String]) -> Result<(Option<f64>, Vec<String>), String> {
+    if is_animethemes_url(url) {
+        println!("[stream] AnimeThemes resolve start: {url}");
+        let direct_url = crate::download::animethemes::resolve_direct_webm(url)?
+            .ok_or_else(|| "AnimeThemesの再生用直リンクを取得できませんでした。".to_string())?;
+        println!(
+            "[stream] AnimeThemes resolved: {}",
+            summarize_media_url(&direct_url)
+        );
+        return Ok((None, vec![direct_url]));
+    }
+
     let yt_dlp = yt_dlp_path();
     if !yt_dlp.exists() || !is_executable(&yt_dlp) {
         return Err("yt-dlpが見つかりません。".to_string());
@@ -265,6 +302,14 @@ fn resolve_media(url: &str, cookie_args: &[String]) -> Result<(Option<f64>, Vec<
         println!("[stream] media url {index}: {}", summarize_media_url(url));
     }
     Ok((duration, urls))
+}
+
+fn is_animethemes_url(url: &str) -> bool {
+    Url::parse(url).ok().is_some_and(|parsed| {
+        parsed.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("animethemes.moe") || host.ends_with(".animethemes.moe")
+        })
+    })
 }
 
 fn parse_duration(raw: &str) -> Option<f64> {
@@ -354,7 +399,9 @@ fn run_ffmpeg(
         } else {
             stderr_tail
         };
-        return Err(format!("ffmpegから映像フレームを取得できませんでした: {detail}"));
+        return Err(format!(
+            "ffmpegから映像フレームを取得できませんでした: {detail}"
+        ));
     }
     Ok(())
 }
@@ -377,7 +424,7 @@ fn build_ffmpeg_command(ffmpeg: &Path, urls: &[String], start_offset: f64) -> Co
         .arg("-stats_period")
         .arg("0.1");
 
-    // 各入力URLにHTTP再接続オプションとシーク位置を付与する。
+    // 解決済みURLはffmpegのHTTPクライアントで直接入力する。
     for url in urls {
         if url.starts_with("http://") || url.starts_with("https://") {
             cmd.arg("-reconnect")
@@ -386,12 +433,18 @@ fn build_ffmpeg_command(ffmpeg: &Path, urls: &[String], start_offset: f64) -> Co
                 .arg("1")
                 .arg("-reconnect_delay_max")
                 .arg("5")
-                .arg("-user_agent")
-                .arg(YOUTUBE_USER_AGENT)
-                .arg("-referer")
-                .arg("https://www.youtube.com/")
-                .arg("-headers")
-                .arg(YOUTUBE_INPUT_HEADERS);
+                .arg("-user_agent");
+            if is_animethemes_url(url) {
+                cmd.arg(ANIMETHEMES_USER_AGENT)
+                    .arg("-referer")
+                    .arg("https://animethemes.moe/");
+            } else {
+                cmd.arg(YOUTUBE_USER_AGENT)
+                    .arg("-referer")
+                    .arg("https://www.youtube.com/")
+                    .arg("-headers")
+                    .arg(YOUTUBE_INPUT_HEADERS);
+            }
         }
         cmd.arg("-ss").arg(&offset).arg("-i").arg(url);
     }

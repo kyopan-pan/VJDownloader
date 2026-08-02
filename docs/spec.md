@@ -118,6 +118,7 @@
 - yt-dlp/ffmpegが見つからない場合はストリーム画面にエラーを表示する。
 
 ### URL解決と再生パイプライン
+- AnimeThemes URLはyt-dlpを使用せず、AnimeThemes API（失敗時はHTML解析）からWebM直リンクを取得してffmpegへ直接渡す。並行キャッシュは作成せず、シーク・ループ時も同じ直リンクを利用する。
 - 再生開始時にyt-dlpで総再生時間と直リンク（映像/音声URL）を取得する。
 - yt-dlpは`--no-playlist`・`youtube:player_client=web`・`youtube:skip=translated_subs`・`--js-runtimes <deno>`・`-f bv*[height<=480]+ba/b[height<=480]/b`・`--print "DURATION:%(duration)s"`・`-g`で実行し、標準出力から`DURATION:`行と`http(s)`のURL行を解析する。
 - yt-dlp実行時は`~/.vjdownloader/bin`をPATH先頭に追加する。

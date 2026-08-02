@@ -379,6 +379,14 @@ impl StreamDeck {
                         }
                     }
                 }
+                StreamEvent::CacheSkipped { cache_id } => {
+                    if cache_id != self.cache_id {
+                        continue;
+                    }
+                    self.cache_cancel_flag = None;
+                    self.cache_tracker = None;
+                    self.cache_dir = None;
+                }
             }
         }
     }
@@ -540,8 +548,8 @@ pub fn render_stream_viewport(
     let viewport_id = stream_viewport_id();
     let builder = egui::ViewportBuilder::default()
         .with_title("ストリーム再生")
-        .with_inner_size(egui::vec2(940.0, 640.0))
-        .with_min_inner_size(egui::vec2(760.0, 540.0))
+        .with_inner_size(egui::vec2(560.0, 560.0))
+        .with_min_inner_size(egui::vec2(480.0, 480.0))
         .with_always_on_top();
 
     let state = Arc::clone(state);
