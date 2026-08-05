@@ -29,9 +29,25 @@ pub(super) fn normalize_parent_for_filter(raw: &str) -> String {
     )
 }
 
-// 文字列検索のために Unicode 正規化と小文字化を行う。
+// 文字列検索のために Unicode 正規化、小文字化、カタカナのひらがな化を行う。
 pub(super) fn normalize_for_search(input: &str) -> String {
-    input.trim().nfkc().collect::<String>().to_lowercase()
+    input
+        .trim()
+        .nfkc()
+        .collect::<String>()
+        .to_lowercase()
+        .chars()
+        .map(katakana_to_hiragana)
+        .collect()
+}
+
+fn katakana_to_hiragana(ch: char) -> char {
+    match ch {
+        '\u{30a1}'..='\u{30f6}' | '\u{30fd}'..='\u{30fe}' => {
+            char::from_u32(ch as u32 - 0x60).unwrap_or(ch)
+        }
+        _ => ch,
+    }
 }
 
 // 検索クエリを index 正規化ルールへ合わせる。
@@ -72,7 +88,7 @@ pub(super) fn is_supported_video_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_supported_video_path;
+    use super::{is_supported_video_path, normalize_for_search};
     use std::path::Path;
 
     #[test]
@@ -82,6 +98,11 @@ mod tests {
         }
         assert!(!is_supported_video_path(Path::new("a.avi")));
         assert!(!is_supported_video_path(Path::new("a.txt")));
+    }
+
+    #[test]
+    fn normalizes_full_width_and_half_width_katakana_to_hiragana() {
+        assert_eq!(normalize_for_search(" ウザ ｳｻﾞ ヽヾ "), "うざ うざ ゝゞ");
     }
 }
 

@@ -85,16 +85,20 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
                             root_id,
                             file_name,
                             file_name_norm,
+                            comment,
+                            comment_norm,
                             parent_dir,
                             size_bytes,
                             modified_time,
                             created_time,
                             last_indexed_time
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(path) DO UPDATE SET
                             root_id = excluded.root_id,
                             file_name = excluded.file_name,
                             file_name_norm = excluded.file_name_norm,
+                            comment = excluded.comment,
+                            comment_norm = excluded.comment_norm,
                             parent_dir = excluded.parent_dir,
                             size_bytes = excluded.size_bytes,
                             modified_time = excluded.modified_time,
@@ -109,6 +113,8 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
                         file.root_id,
                         file.file_name,
                         file.file_name_norm,
+                        file.comment,
+                        file.comment_norm,
                         file.parent_dir,
                         file.size_bytes,
                         file.modified_time,
@@ -159,19 +165,24 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
             root_id,
             marker,
             finished_at,
+            resp,
         } => {
-            let tx = conn.transaction().map_err(|err| err.to_string())?;
-            tx.execute(
-                "DELETE FROM files WHERE root_id = ? AND last_indexed_time < ?",
-                params![root_id, marker],
-            )
-            .map_err(|err| err.to_string())?;
-            tx.execute(
-                "UPDATE roots SET last_scan_time = ? WHERE root_id = ?",
-                params![finished_at, root_id],
-            )
-            .map_err(|err| err.to_string())?;
-            tx.commit().map_err(|err| err.to_string())?;
+            let result = (|| {
+                let tx = conn.transaction().map_err(|err| err.to_string())?;
+                tx.execute(
+                    "DELETE FROM files WHERE root_id = ? AND last_indexed_time < ?",
+                    params![root_id, marker],
+                )
+                .map_err(|err| err.to_string())?;
+                tx.execute(
+                    "UPDATE roots SET last_scan_time = ? WHERE root_id = ?",
+                    params![finished_at, root_id],
+                )
+                .map_err(|err| err.to_string())?;
+                tx.commit().map_err(|err| err.to_string())
+            })();
+            let _ = resp.send(result.clone());
+            result?;
         }
         WriteCommand::Shutdown => {}
     }

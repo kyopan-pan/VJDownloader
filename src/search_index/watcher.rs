@@ -170,7 +170,7 @@ fn flush_pending_changes(
             }
 
             if let Some(root_id) = find_root_id_for_path(&path, roots) {
-                if let Some(record) = build_record_from_path(root_id, &path, epoch_millis()) {
+                if let Some(record) = build_record_from_path(root_id, &path, epoch_millis(), None) {
                     write_tx
                         .send(WriteCommand::UpsertFiles {
                             files: vec![record],
@@ -272,7 +272,7 @@ pub(super) fn apply_upsert_change(
         return Ok(());
     };
 
-    if let Some(record) = build_record_from_path(root_id, new_path, epoch_millis()) {
+    if let Some(record) = build_record_from_path(root_id, new_path, epoch_millis(), None) {
         write_tx
             .send(WriteCommand::UpsertFiles {
                 files: vec![record],

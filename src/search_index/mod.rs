@@ -8,8 +8,8 @@ mod writer;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,12 +20,29 @@ use scanner::scan_root;
 use watcher::watcher_loop;
 use writer::writer_loop;
 
-const DB_SCHEMA_VERSION: i32 = 1;
+const DB_SCHEMA_VERSION: i32 = 2;
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(700);
 const UPSERT_BATCH_SIZE: usize = 256;
 const MAX_SEARCH_LIMIT: usize = 1_000;
 
 pub type EngineResult<T> = Result<T, String>;
+
+#[derive(Clone, Debug)]
+pub enum IndexEvent {
+    UpdateStarted {
+        target: IndexEventTarget,
+    },
+    UpdateFinished {
+        target: IndexEventTarget,
+        result: EngineResult<()>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexEventTarget {
+    Main,
+    Settings,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SearchSort {
@@ -94,6 +111,7 @@ struct EngineInner {
     db_path: PathBuf,
     write_tx: Sender<WriteCommand>,
     watcher_tx: Sender<WatcherMessage>,
+    index_event_txs: Mutex<Vec<Sender<IndexEvent>>>,
 }
 
 #[derive(Debug)]
@@ -119,6 +137,7 @@ enum WriteCommand {
         root_id: i64,
         marker: i64,
         finished_at: i64,
+        resp: Sender<EngineResult<()>>,
     },
     Shutdown,
 }
@@ -129,6 +148,8 @@ struct FileRecord {
     root_id: i64,
     file_name: String,
     file_name_norm: String,
+    comment: String,
+    comment_norm: Option<String>,
     parent_dir: String,
     size_bytes: i64,
     modified_time: i64,
@@ -180,11 +201,21 @@ impl SearchEngine {
                 db_path,
                 write_tx,
                 watcher_tx,
+                index_event_txs: Mutex::new(Vec::new()),
             }),
         };
 
         engine.refresh_watcher_roots()?;
         Ok(engine)
+    }
+
+    // UIがフルスキャンの開始・完了を受け取るための購読チャンネルを作る。
+    pub fn subscribe_index_events(&self) -> mpsc::Receiver<IndexEvent> {
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut subscribers) = self.inner.index_event_txs.lock() {
+            subscribers.push(tx);
+        }
+        rx
     }
 
     // DB 上の監視ルート一覧を UI 用構造体で返す。
@@ -217,6 +248,18 @@ impl SearchEngine {
 
     // desired ルート集合と DB の差分を同期し、必要な full scan を起動する。
     pub fn sync_roots(&self, desired_paths: &[PathBuf]) -> EngineResult<()> {
+        self.sync_roots_with_target(desired_paths, IndexEventTarget::Main)
+    }
+
+    pub fn sync_roots_from_settings(&self, desired_paths: &[PathBuf]) -> EngineResult<()> {
+        self.sync_roots_with_target(desired_paths, IndexEventTarget::Settings)
+    }
+
+    fn sync_roots_with_target(
+        &self,
+        desired_paths: &[PathBuf],
+        target: IndexEventTarget,
+    ) -> EngineResult<()> {
         let mut normalized_paths = Vec::new();
         let mut dedup = HashSet::new();
 
@@ -245,19 +288,31 @@ impl SearchEngine {
             .iter()
             .map(|(_, key)| key.clone())
             .collect();
+        let mut scan_started = false;
 
         for (path, key) in &normalized_paths {
             let added_now = !current_map.contains_key(key);
             let root_id = self.add_or_enable_root(key)?;
             if added_now {
-                self.start_full_scan(root_id, path.clone());
+                self.start_full_scan(root_id, path.clone(), target);
+                scan_started = true;
             }
         }
 
+        let mut removed_any = false;
         for entry in current {
             if !desired_set.contains(&entry.root_path) {
                 self.remove_root(entry.root_id)?;
+                removed_any = true;
             }
+        }
+
+        if removed_any && !scan_started {
+            self.notify_index_event(IndexEvent::UpdateStarted { target });
+            self.notify_index_event(IndexEvent::UpdateFinished {
+                target,
+                result: Ok(()),
+            });
         }
 
         self.refresh_watcher_roots()?;
@@ -266,14 +321,28 @@ impl SearchEngine {
 
     // 有効ルートすべてに対して再インデックスを非同期起動する。
     pub fn reindex_all_async(&self) -> EngineResult<()> {
-        let roots = self.list_roots()?;
-        for root in roots.into_iter().filter(|root| root.is_enabled) {
-            self.start_full_scan(root.root_id, PathBuf::from(root.root_path));
-        }
-        Ok(())
+        self.reindex_all_async_for(IndexEventTarget::Main)
+            .map(|_| ())
     }
 
-    // クエリを正規化し、prefix -> contains の順で段階検索する。
+    pub fn reindex_all_from_settings_async(&self) -> EngineResult<usize> {
+        self.reindex_all_async_for(IndexEventTarget::Settings)
+    }
+
+    fn reindex_all_async_for(&self, target: IndexEventTarget) -> EngineResult<usize> {
+        let roots = self.list_roots()?;
+        let enabled_roots = roots
+            .into_iter()
+            .filter(|root| root.is_enabled)
+            .collect::<Vec<_>>();
+        let root_count = enabled_roots.len();
+        for root in enabled_roots {
+            self.start_full_scan(root.root_id, PathBuf::from(root.root_path), target);
+        }
+        Ok(root_count)
+    }
+
+    // クエリを正規化し、空白区切りは AND、単語1つは prefix -> contains で検索する。
     pub fn search(&self, request: &SearchRequest) -> EngineResult<Vec<SearchHit>> {
         let conn = open_connection(&self.inner.db_path)?;
         let limit = request.limit.clamp(1, MAX_SEARCH_LIMIT);
@@ -283,7 +352,28 @@ impl SearchEngine {
             return run_search_query(&conn, request, None, limit);
         }
 
-        let escaped = escape_like_pattern(&normalized_query);
+        let mut terms = Vec::new();
+        for term in normalized_query.split_whitespace() {
+            if !terms.contains(&term) {
+                terms.push(term);
+            }
+        }
+
+        if terms.len() > 1 {
+            let patterns = terms
+                .into_iter()
+                .map(|term| format!("%{}%", escape_like_pattern(term)))
+                .collect();
+            return run_search_query(
+                &conn,
+                request,
+                Some(QueryPattern::AllTerms { patterns }),
+                limit,
+            );
+        }
+
+        let single_term = terms[0];
+        let escaped = escape_like_pattern(single_term);
         let prefix_pattern = format!("{escaped}%");
         let contains_pattern = format!("%{escaped}%");
 
@@ -292,7 +382,7 @@ impl SearchEngine {
             request,
             Some(QueryPattern::Prefix {
                 pattern: prefix_pattern.clone(),
-                exact: normalized_query.clone(),
+                exact: single_term.to_string(),
             }),
             limit,
         )?;
@@ -374,17 +464,28 @@ impl SearchEngine {
     }
 
     // ルート単位の full scan をバックグラウンドで起動する。
-    fn start_full_scan(&self, root_id: i64, root_path: PathBuf) {
+    fn start_full_scan(&self, root_id: i64, root_path: PathBuf, target: IndexEventTarget) {
         let write_tx = self.inner.write_tx.clone();
+        let db_path = self.inner.db_path.clone();
+        self.notify_index_event(IndexEvent::UpdateStarted { target });
+        let engine = self.clone();
         thread::spawn(move || {
-            if let Err(err) = scan_root(root_id, &root_path, &write_tx) {
+            let result = scan_root(root_id, &root_path, &db_path, &write_tx);
+            if let Err(err) = &result {
                 eprintln!(
                     "[search-index] full scan failed for {}: {}",
                     root_path.to_string_lossy(),
                     err
                 );
             }
+            engine.notify_index_event(IndexEvent::UpdateFinished { target, result });
         });
+    }
+
+    fn notify_index_event(&self, event: IndexEvent) {
+        if let Ok(mut subscribers) = self.inner.index_event_txs.lock() {
+            subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+        }
     }
 }
 
@@ -453,6 +554,39 @@ mod tests {
             })
             .expect("search all supported videos");
         assert_eq!(all_hits.len(), 5);
+    }
+
+    #[test]
+    fn reports_completion_after_index_writes_are_committed() {
+        let (temp, engine) = setup_engine();
+        let root = temp.path().join("videos");
+        fs::create_dir_all(&root).expect("create root");
+        write_dummy(&root.join("完了通知.mp4"), 64);
+        let events = engine.subscribe_index_events();
+
+        engine.sync_roots(&[root]).expect("sync roots");
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(2)),
+            Ok(IndexEvent::UpdateStarted {
+                target: IndexEventTarget::Main
+            })
+        ));
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(2)),
+            Ok(IndexEvent::UpdateFinished {
+                target: IndexEventTarget::Main,
+                result: Ok(())
+            })
+        ));
+
+        let hits = engine
+            .search(&SearchRequest {
+                query: "完了通知".to_string(),
+                limit: 20,
+                ..Default::default()
+            })
+            .expect("search immediately after completion event");
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]
@@ -558,5 +692,108 @@ mod tests {
             .expect("search escaped");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].file_name, "100%_test.mp4");
+    }
+
+    #[test]
+    fn searches_whitespace_separated_terms_with_and_semantics() {
+        let (temp, engine) = setup_engine();
+        let root = temp.path().join("videos");
+        fs::create_dir_all(&root).expect("create root");
+
+        write_dummy(&root.join("ふ・れ・ん・ど・し・た・い.mp4"), 64);
+        write_dummy(&root.join("ふ・た・り.mp4"), 64);
+        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine.reindex_all_async().expect("reindex all");
+        thread::sleep(Duration::from_millis(350));
+
+        let hits = engine
+            .search(&SearchRequest {
+                query: "ふ れ".to_string(),
+                limit: 20,
+                sort: SearchSort::NameAsc,
+                ..Default::default()
+            })
+            .expect("search by multiple terms");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_name, "ふ・れ・ん・ど・し・た・い.mp4");
+
+        let reversed_hits = engine
+            .search(&SearchRequest {
+                query: "れ ふ".to_string(),
+                limit: 20,
+                sort: SearchSort::NameAsc,
+                ..Default::default()
+            })
+            .expect("search by reversed terms");
+        assert_eq!(reversed_hits.len(), 1);
+    }
+
+    #[test]
+    fn searches_video_comments_and_combines_them_with_file_names() {
+        let (temp, engine) = setup_engine();
+        let root = temp.path().join("videos");
+        fs::create_dir_all(&root).expect("create root");
+        let video_path = root.join("ライブ映像.mp4");
+        write_dummy(&video_path, 64);
+
+        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine.reindex_all_async().expect("reindex all");
+        thread::sleep(Duration::from_millis(350));
+
+        let conn = open_connection(&engine.inner.db_path).expect("open index");
+        conn.execute(
+            "UPDATE files SET comment = ?, comment_norm = ? WHERE path = ?",
+            (
+                "これはYouTubeの概要欄です",
+                normalize::normalize_for_search("これはYouTubeの概要欄です"),
+                path_to_key(&video_path),
+            ),
+        )
+        .expect("store comment metadata");
+
+        let comment_hits = engine
+            .search(&SearchRequest {
+                query: "youtube".to_string(),
+                limit: 20,
+                sort: SearchSort::NameAsc,
+                ..Default::default()
+            })
+            .expect("search comment");
+        assert_eq!(comment_hits.len(), 1);
+
+        let combined_hits = engine
+            .search(&SearchRequest {
+                query: "ライブ 概要欄".to_string(),
+                limit: 20,
+                sort: SearchSort::NameAsc,
+                ..Default::default()
+            })
+            .expect("search across file name and comment");
+        assert_eq!(combined_hits.len(), 1);
+    }
+
+    #[test]
+    fn searches_katakana_with_hiragana_query() {
+        let (temp, engine) = setup_engine();
+        let root = temp.path().join("videos");
+        fs::create_dir_all(&root).expect("create root");
+        write_dummy(&root.join("ウザい映像.mp4"), 64);
+
+        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine.reindex_all_async().expect("reindex all");
+        thread::sleep(Duration::from_millis(350));
+
+        let hits = engine
+            .search(&SearchRequest {
+                query: "うざ".to_string(),
+                limit: 20,
+                sort: SearchSort::NameAsc,
+                ..Default::default()
+            })
+            .expect("search katakana with hiragana");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_name, "ウザい映像.mp4");
     }
 }

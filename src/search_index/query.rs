@@ -15,6 +15,9 @@ pub(super) enum QueryPattern {
         pattern: String,
         prefix_pattern: String,
     },
+    AllTerms {
+        patterns: Vec<String>,
+    },
 }
 
 // 検索条件を SQL に組み立て、files テーブルからヒットを取得する。
@@ -91,10 +94,26 @@ pub(super) fn run_search_query(
             pattern,
             prefix_pattern,
         }) => {
-            sql.push_str(" AND f.file_name_norm LIKE ? ESCAPE '\\'");
+            sql.push_str(
+                " AND (f.file_name_norm LIKE ? ESCAPE '\\'
+                       OR COALESCE(f.comment_norm, '') LIKE ? ESCAPE '\\')",
+            );
+            params.push(Value::from(pattern.clone()));
             params.push(Value::from(pattern));
             sql.push_str(" AND f.file_name_norm NOT LIKE ? ESCAPE '\\'");
             params.push(Value::from(prefix_pattern));
+            sql.push_str(" ORDER BY ");
+            push_sort_clause(&mut sql, request.sort);
+        }
+        Some(QueryPattern::AllTerms { patterns }) => {
+            for pattern in patterns {
+                sql.push_str(
+                    " AND (f.file_name_norm LIKE ? ESCAPE '\\'
+                           OR COALESCE(f.comment_norm, '') LIKE ? ESCAPE '\\')",
+                );
+                params.push(Value::from(pattern.clone()));
+                params.push(Value::from(pattern));
+            }
             sql.push_str(" ORDER BY ");
             push_sort_clause(&mut sql, request.sort);
         }

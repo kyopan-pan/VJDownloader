@@ -2,6 +2,7 @@ use eframe::egui;
 use eframe::emath::GuiRounding;
 
 use crate::app::DownloaderApp;
+use crate::app::IndexUpdateState;
 use crate::cursor::pointing;
 use crate::logs::ui as log_ui;
 use crate::settings::ui as settings_ui;
@@ -19,6 +20,7 @@ pub fn render(
 ) {
     let ctx = root_ui.ctx().clone();
     settings_ui::render_toolbar(app, &ctx);
+    render_index_update_toast(&ctx, app);
     let panel_bg = egui::Color32::from_rgb(15, 23, 42);
     let panel_frame = egui::Frame::NONE
         .fill(panel_bg)
@@ -51,6 +53,126 @@ pub fn render(
 
     settings_ui::render_windows(&app.settings_ui, &ctx);
     log_ui::render_log_viewport(&app.log_ui, &app.status_logs, &ctx);
+}
+
+fn render_index_update_toast(ctx: &egui::Context, app: &mut DownloaderApp) {
+    const VISIBLE_FOR: f32 = 3.2;
+    let (text, color, progress, is_updating) = match &app.index_update_state {
+        IndexUpdateState::Idle => return,
+        IndexUpdateState::Updating => (
+            "インデックスを更新中…".to_string(),
+            egui::Color32::from_rgb(16, 190, 255),
+            0.0,
+            true,
+        ),
+        IndexUpdateState::Succeeded(at) => {
+            let elapsed = at.elapsed().as_secs_f32();
+            if elapsed >= VISIBLE_FOR {
+                app.index_update_state = IndexUpdateState::Idle;
+                return;
+            }
+            (
+                "インデックスを更新しました".to_string(),
+                egui::Color32::from_rgb(52, 211, 153),
+                (elapsed / 0.45).clamp(0.0, 1.0),
+                false,
+            )
+        }
+        IndexUpdateState::Failed { at, message } => {
+            let elapsed = at.elapsed().as_secs_f32();
+            if elapsed >= VISIBLE_FOR + 2.0 {
+                app.index_update_state = IndexUpdateState::Idle;
+                return;
+            }
+            (
+                format!("インデックスの更新に失敗しました: {message}"),
+                egui::Color32::from_rgb(248, 113, 113),
+                (elapsed / 0.3).clamp(0.0, 1.0),
+                false,
+            )
+        }
+    };
+
+    egui::Area::new(egui::Id::new("index_update_toast"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 18.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(24, 32, 48))
+                .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.7)))
+                .corner_radius(egui::CornerRadius::same(12))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 5],
+                    blur: 14,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(100),
+                })
+                .inner_margin(egui::Margin::symmetric(14, 11))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if is_updating {
+                            ui.add(egui::Spinner::new().size(20.0).color(color));
+                        } else {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                            let center = rect.center();
+                            let radius = 9.0 * ease_out_back(progress);
+                            ui.painter().circle_stroke(
+                                center,
+                                radius,
+                                egui::Stroke::new(2.0, color),
+                            );
+                            if matches!(app.index_update_state, IndexUpdateState::Succeeded(_)) {
+                                paint_check_mark(ui.painter(), center, color, progress);
+                            } else {
+                                ui.painter().line_segment(
+                                    [
+                                        center + egui::vec2(0.0, -4.0),
+                                        center + egui::vec2(0.0, 2.0),
+                                    ],
+                                    egui::Stroke::new(2.0, color),
+                                );
+                                ui.painter().circle_filled(
+                                    center + egui::vec2(0.0, 5.0),
+                                    1.2,
+                                    color,
+                                );
+                            }
+                        }
+                        ui.add_space(3.0);
+                        ui.label(
+                            egui::RichText::new(text)
+                                .size(12.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(226, 232, 240)),
+                        );
+                    });
+                });
+        });
+}
+
+fn ease_out_back(value: f32) -> f32 {
+    let x = value - 1.0;
+    1.0 + 2.70158 * x * x * x + 1.70158 * x * x
+}
+
+fn paint_check_mark(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    color: egui::Color32,
+    progress: f32,
+) {
+    let progress = ((progress - 0.35) / 0.65).clamp(0.0, 1.0);
+    let start = center + egui::vec2(-4.5, 0.0);
+    let middle = center + egui::vec2(-1.2, 3.5);
+    let end = center + egui::vec2(5.0, -3.5);
+    let stroke = egui::Stroke::new(2.0, color);
+    if progress <= 0.4 {
+        painter.line_segment([start, start.lerp(middle, progress / 0.4)], stroke);
+    } else {
+        painter.line_segment([start, middle], stroke);
+        painter.line_segment([middle, middle.lerp(end, (progress - 0.4) / 0.6)], stroke);
+    }
 }
 
 fn render_download_section(

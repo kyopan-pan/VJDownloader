@@ -10,7 +10,9 @@ use crate::paths::{search_index_db_path, yt_dlp_path};
 use crate::platform::input_source::{InputMode, current_mode};
 use crate::platform::menu as mac_menu;
 use crate::platform::window as mac_window;
-use crate::search_index::{SearchEngine, SearchHit, SearchRequest, SearchSort};
+use crate::search_index::{
+    IndexEvent, IndexEventTarget, SearchEngine, SearchHit, SearchRequest, SearchSort,
+};
 use crate::settings::ui as settings_ui;
 use crate::settings::{SettingsData, cookie_args_from_settings, save_settings};
 use crate::speed_test as speed_test_ui;
@@ -91,6 +93,10 @@ pub struct DownloaderApp {
     pub(crate) search_error: Option<String>,
     pub(crate) search_engine: Option<SearchEngine>,
     pub(crate) search_roots_sync_error: Option<String>,
+    pub(crate) index_update_state: IndexUpdateState,
+    index_event_rx: Option<mpsc::Receiver<IndexEvent>>,
+    active_index_updates: usize,
+    index_update_error: Option<String>,
     search_job_tx: Option<mpsc::Sender<SearchJob>>,
     search_result_rx: Option<mpsc::Receiver<SearchJobResult>>,
     search_request_seq: u64,
@@ -98,6 +104,13 @@ pub struct DownloaderApp {
     search_dirty: bool,
     last_input_mode: Option<InputMode>,
     last_focus_state: Option<bool>,
+}
+
+pub(crate) enum IndexUpdateState {
+    Idle,
+    Updating,
+    Succeeded(Instant),
+    Failed { at: Instant, message: String },
 }
 
 impl DownloaderApp {
@@ -114,7 +127,11 @@ impl DownloaderApp {
             .search_panel_width
             .parse::<f32>()
             .unwrap_or(window_width * 0.5);
+        let bundled_tools_error = ensure_bundled_tools().err();
         let search_engine = SearchEngine::new(search_index_db_path()).ok();
+        let index_event_rx = search_engine
+            .as_ref()
+            .map(SearchEngine::subscribe_index_events);
         let mut search_roots_sync_error = None;
 
         if let Some(engine) = search_engine.as_ref() {
@@ -167,6 +184,10 @@ impl DownloaderApp {
             search_error: None,
             search_engine,
             search_roots_sync_error,
+            index_update_state: IndexUpdateState::Idle,
+            index_event_rx,
+            active_index_updates: 0,
+            index_update_error: None,
             search_job_tx,
             search_result_rx,
             search_request_seq: 0,
@@ -179,7 +200,7 @@ impl DownloaderApp {
         mac_menu::install_settings_menu();
         mac_window::apply_app_icon_from_icns();
 
-        if let Err(err) = ensure_bundled_tools() {
+        if let Some(err) = bundled_tools_error {
             app.push_status(format!("同梱ツールの配置に失敗しました: {err}"));
         }
 
@@ -305,19 +326,19 @@ impl DownloaderApp {
             );
         };
         let paths = roots.iter().map(PathBuf::from).collect::<Vec<_>>();
-        engine.sync_roots(&paths)?;
+        engine.sync_roots_from_settings(&paths)?;
         self.search_roots_sync_error = None;
         self.search_dirty = true;
         Ok(())
     }
 
-    pub(crate) fn request_reindex_all(&mut self) -> Result<(), String> {
+    pub(crate) fn request_reindex_all(&mut self) -> Result<usize, String> {
         let Some(engine) = self.search_engine.as_ref() else {
             return Err("検索エンジンが初期化されていません。".to_string());
         };
-        engine.reindex_all_async()?;
+        let root_count = engine.reindex_all_from_settings_async()?;
         self.search_dirty = true;
-        Ok(())
+        Ok(root_count)
     }
 
     fn poll_download_events(&mut self) {
@@ -489,6 +510,60 @@ impl DownloaderApp {
         }
     }
 
+    fn poll_index_events(&mut self, ctx: &egui::Context) {
+        let mut events = Vec::new();
+        if let Some(rx) = self.index_event_rx.as_ref() {
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+        }
+
+        for event in events {
+            match event {
+                IndexEvent::UpdateStarted {
+                    target: IndexEventTarget::Main,
+                } => {
+                    self.active_index_updates = self.active_index_updates.saturating_add(1);
+                    self.index_update_error = None;
+                    self.index_update_state = IndexUpdateState::Updating;
+                }
+                IndexEvent::UpdateFinished {
+                    target: IndexEventTarget::Main,
+                    result,
+                } => {
+                    self.active_index_updates = self.active_index_updates.saturating_sub(1);
+                    if let Err(error) = result {
+                        self.index_update_error = Some(error);
+                    }
+                    if self.active_index_updates == 0 {
+                        self.search_dirty = true;
+                        self.index_update_state = match self.index_update_error.take() {
+                            Some(message) => IndexUpdateState::Failed {
+                                at: Instant::now(),
+                                message,
+                            },
+                            None => IndexUpdateState::Succeeded(Instant::now()),
+                        };
+                    }
+                }
+                IndexEvent::UpdateStarted {
+                    target: IndexEventTarget::Settings,
+                } => self.settings_ui.send_index_started(),
+                IndexEvent::UpdateFinished {
+                    target: IndexEventTarget::Settings,
+                    result,
+                } => {
+                    self.search_dirty = true;
+                    self.settings_ui.send_index_finished(result);
+                }
+            }
+        }
+
+        if !matches!(self.index_update_state, IndexUpdateState::Idle) {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
     fn maintain_cursor_tracking(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.focused);
         let focus_changed = self.last_focus_state != Some(focused);
@@ -550,6 +625,7 @@ impl eframe::App for DownloaderApp {
         self.poll_download_events();
         self.refresh_downloads_if_needed();
         self.poll_search_results();
+        self.poll_index_events(&ctx);
         self.submit_search_if_needed();
         ui::render(self, root_ui, frame);
         speed_test_ui::render_speed_test_viewport(&self.speed_test_ui, &ctx);

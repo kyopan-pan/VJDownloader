@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::app::DownloaderApp;
 use crate::cursor::pointing;
@@ -52,7 +53,9 @@ pub enum SettingsAction {
 enum SettingsResult {
     Saved(SettingsData),
     Error(String),
-    Reindexed(Result<(), String>),
+    Reindexed(Result<usize, String>),
+    IndexStarted,
+    IndexFinished(Result<(), String>),
 }
 
 pub struct SettingsUiHandle {
@@ -88,6 +91,16 @@ pub struct SettingsUiState {
     chrome_profiles: Vec<ChromeProfile>,
     action_tx: mpsc::Sender<SettingsAction>,
     result_rx: mpsc::Receiver<SettingsResult>,
+    index_update_state: SettingsIndexUpdateState,
+    active_index_updates: usize,
+    index_update_error: Option<String>,
+}
+
+enum SettingsIndexUpdateState {
+    Idle,
+    Updating,
+    Succeeded(Instant),
+    Failed { at: Instant, message: String },
 }
 
 impl SettingsUiHandle {
@@ -108,6 +121,9 @@ impl SettingsUiHandle {
                 chrome_profiles: load_chrome_profiles(),
                 action_tx,
                 result_rx,
+                index_update_state: SettingsIndexUpdateState::Idle,
+                active_index_updates: 0,
+                index_update_error: None,
             })),
             settings_visible: Arc::new(AtomicBool::new(false)),
             initial_setup_visible: Arc::new(AtomicBool::new(needs_initial_setup)),
@@ -141,6 +157,14 @@ impl SettingsUiHandle {
     fn send_result(&self, result: SettingsResult) {
         let _ = self.result_tx.send(result);
     }
+
+    pub(crate) fn send_index_started(&self) {
+        self.send_result(SettingsResult::IndexStarted);
+    }
+
+    pub(crate) fn send_index_finished(&self, result: Result<(), String>) {
+        self.send_result(SettingsResult::IndexFinished(result));
+    }
 }
 
 impl SettingsUiState {
@@ -169,7 +193,40 @@ impl SettingsUiState {
                     self.form.error = None;
                 }
                 SettingsResult::Error(error) => self.form.error = Some(error),
-                SettingsResult::Reindexed(result) => self.form.error = result.err(),
+                SettingsResult::Reindexed(Ok(0)) => {
+                    self.form.error = None;
+                    self.index_update_state = SettingsIndexUpdateState::Succeeded(Instant::now());
+                }
+                SettingsResult::Reindexed(Ok(_)) => self.form.error = None,
+                SettingsResult::Reindexed(Err(error)) => {
+                    self.form.error = Some(error.clone());
+                    self.index_update_state = SettingsIndexUpdateState::Failed {
+                        at: Instant::now(),
+                        message: error,
+                    };
+                }
+                SettingsResult::IndexStarted => {
+                    if self.active_index_updates == 0 {
+                        self.index_update_error = None;
+                    }
+                    self.active_index_updates = self.active_index_updates.saturating_add(1);
+                    self.index_update_state = SettingsIndexUpdateState::Updating;
+                }
+                SettingsResult::IndexFinished(result) => {
+                    self.active_index_updates = self.active_index_updates.saturating_sub(1);
+                    if let Err(error) = result {
+                        self.index_update_error = Some(error);
+                    }
+                    if self.active_index_updates == 0 {
+                        self.index_update_state = match self.index_update_error.take() {
+                            Some(message) => SettingsIndexUpdateState::Failed {
+                                at: Instant::now(),
+                                message,
+                            },
+                            None => SettingsIndexUpdateState::Succeeded(Instant::now()),
+                        };
+                    }
+                }
             }
         }
     }
@@ -813,6 +870,7 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
     let mut remove_index = None;
     let mut add_directory = None;
     let mut changed = false;
+    let indexing = matches!(state.index_update_state, SettingsIndexUpdateState::Updating);
 
     egui::Frame::NONE
         .fill(panel_fill)
@@ -833,7 +891,7 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
                             .color(egui::Color32::from_rgb(8, 14, 24)),
                     )
                     .fill(egui::Color32::from_rgb(16, 190, 255));
-                    if pointing(ui.add(btn)).clicked() {
+                    if pointing(ui.add_enabled(!indexing, btn)).clicked() {
                         should_reindex = true;
                     }
                 });
@@ -885,6 +943,8 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
                     });
                 }
             }
+
+            render_index_update_status(ui, state);
         });
 
     if let Some(path) = add_directory {
@@ -909,6 +969,116 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
     }
 
     (should_reindex, changed)
+}
+
+fn render_index_update_status(ui: &mut egui::Ui, state: &mut SettingsUiState) {
+    const VISIBLE_FOR: f32 = 3.2;
+    let (text, color, progress, updating) = match &state.index_update_state {
+        SettingsIndexUpdateState::Idle => return,
+        SettingsIndexUpdateState::Updating => (
+            "インデックスを更新中…".to_string(),
+            egui::Color32::from_rgb(16, 190, 255),
+            0.0,
+            true,
+        ),
+        SettingsIndexUpdateState::Succeeded(at) => {
+            let elapsed = at.elapsed().as_secs_f32();
+            if elapsed >= VISIBLE_FOR {
+                state.index_update_state = SettingsIndexUpdateState::Idle;
+                return;
+            }
+            (
+                "インデックスを更新しました".to_string(),
+                egui::Color32::from_rgb(52, 211, 153),
+                (elapsed / 0.45).clamp(0.0, 1.0),
+                false,
+            )
+        }
+        SettingsIndexUpdateState::Failed { at, message } => {
+            let elapsed = at.elapsed().as_secs_f32();
+            if elapsed >= VISIBLE_FOR + 2.0 {
+                state.index_update_state = SettingsIndexUpdateState::Idle;
+                return;
+            }
+            (
+                format!("インデックスの更新に失敗しました: {message}"),
+                egui::Color32::from_rgb(248, 113, 113),
+                (elapsed / 0.3).clamp(0.0, 1.0),
+                false,
+            )
+        }
+    };
+
+    ui.add_space(10.0);
+    egui::Frame::NONE
+        .fill(color.gamma_multiply(0.08))
+        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.55)))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                if updating {
+                    ui.add(egui::Spinner::new().size(18.0).color(color));
+                } else {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                    let center = rect.center();
+                    ui.painter().circle_stroke(
+                        center,
+                        8.0 * settings_ease_out_back(progress),
+                        egui::Stroke::new(1.8, color),
+                    );
+                    if matches!(
+                        state.index_update_state,
+                        SettingsIndexUpdateState::Succeeded(_)
+                    ) {
+                        paint_settings_check_mark(ui.painter(), center, color, progress);
+                    } else {
+                        ui.painter().line_segment(
+                            [
+                                center + egui::vec2(0.0, -3.5),
+                                center + egui::vec2(0.0, 2.0),
+                            ],
+                            egui::Stroke::new(1.8, color),
+                        );
+                        ui.painter()
+                            .circle_filled(center + egui::vec2(0.0, 4.8), 1.1, color);
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(text)
+                        .size(11.5)
+                        .strong()
+                        .color(egui::Color32::from_rgb(210, 222, 238)),
+                );
+            });
+        });
+    ui.ctx().request_repaint_after(Duration::from_millis(16));
+}
+
+fn settings_ease_out_back(value: f32) -> f32 {
+    let x = value - 1.0;
+    1.0 + 2.70158 * x * x * x + 1.70158 * x * x
+}
+
+fn paint_settings_check_mark(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    color: egui::Color32,
+    progress: f32,
+) {
+    let progress = ((progress - 0.35) / 0.65).clamp(0.0, 1.0);
+    let start = center + egui::vec2(-4.0, 0.0);
+    let middle = center + egui::vec2(-1.0, 3.0);
+    let end = center + egui::vec2(4.5, -3.0);
+    let stroke = egui::Stroke::new(1.8, color);
+    if progress <= 0.4 {
+        painter.line_segment([start, start.lerp(middle, progress / 0.4)], stroke);
+    } else {
+        painter.line_segment([start, middle], stroke);
+        painter.line_segment([middle, middle.lerp(end, (progress - 0.4) / 0.6)], stroke);
+    }
 }
 
 fn render_tool_card(

@@ -182,7 +182,11 @@ fn load_syphon_framework() -> Result<NonNull<c_void>, String> {
             println!("[syphon] loaded framework: {}", path.to_string_lossy());
             return Ok(handle);
         }
-        errors.push(format!("{} ({})", path.to_string_lossy(), last_dlopen_error()));
+        errors.push(format!(
+            "{} ({})",
+            path.to_string_lossy(),
+            last_dlopen_error()
+        ));
     }
 
     Err(format!(
