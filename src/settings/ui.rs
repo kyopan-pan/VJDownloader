@@ -1292,6 +1292,7 @@ pub fn process_requests(app: &mut DownloaderApp, ctx: &egui::Context) {
                 }
 
                 app.download_dir = applied.download_dir;
+                app.converter_ui.set_output_dir(app.download_dir.clone());
                 app.refresh_needed = true;
                 app.pending_window_resize = Some(applied.window_size);
                 app.cookie_args = cookie_args_from_settings(&applied.data);

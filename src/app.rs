@@ -1,4 +1,5 @@
 use crate::bundled::ensure_bundled_tools;
+use crate::converter::{ConversionEvent, ConverterUiHandle, render_converter_viewport};
 use crate::download::{
     CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressUpdate, ensure_deno, ensure_yt_dlp,
     read_clipboard_text, run_download,
@@ -82,6 +83,7 @@ pub struct DownloaderApp {
     pub(crate) log_ui: Arc<Mutex<LogUiState>>,
     pub(crate) speed_test_ui: Arc<Mutex<SpeedTestUiState>>,
     pub(crate) stream_ui: Arc<Mutex<StreamUiState>>,
+    pub(crate) converter_ui: ConverterUiHandle,
     pub(crate) status_logs: Arc<Mutex<AppLogger>>,
     pub(crate) pending_window_resize: Option<egui::Vec2>,
     pub(crate) did_snap: bool,
@@ -156,6 +158,7 @@ impl DownloaderApp {
         };
 
         let mut app = Self {
+            converter_ui: ConverterUiHandle::new(download_dir.clone()),
             download_dir,
             downloaded_files: Vec::new(),
             download_in_progress: false,
@@ -385,6 +388,24 @@ impl DownloaderApp {
         }
     }
 
+    fn poll_conversion_events(&mut self) {
+        while let Ok(event) = self.converter_ui.try_recv_event() {
+            match event {
+                ConversionEvent::Completed(_path) => {
+                    self.push_status(format!(
+                        "MP4変換が完了しました: {}",
+                        _path.to_string_lossy()
+                    ));
+                    self.refresh_needed = true;
+                }
+                ConversionEvent::Failed(error) => {
+                    self.push_status(format!("MP4変換に失敗しました: {error}"));
+                }
+                ConversionEvent::Log(line) => self.push_status(line),
+            }
+        }
+    }
+
     fn refresh_downloads_if_needed(&mut self) {
         if self.refresh_needed || self.last_scan.elapsed() >= Duration::from_secs(2) {
             self.downloaded_files = load_mp4_files(&self.download_dir);
@@ -599,6 +620,9 @@ impl eframe::App for DownloaderApp {
                 state.open_stream();
             }
         }
+        if mac_menu::take_open_converter_request() {
+            self.converter_ui.open();
+        }
         self.current_window_size = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.size()));
         if let Some(size) = self.pending_window_resize.take() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
@@ -623,6 +647,7 @@ impl eframe::App for DownloaderApp {
         settings_ui::process_requests(self, &ctx);
         self.poll_input_mode_change();
         self.poll_download_events();
+        self.poll_conversion_events();
         self.refresh_downloads_if_needed();
         self.poll_search_results();
         self.poll_index_events(&ctx);
@@ -630,6 +655,7 @@ impl eframe::App for DownloaderApp {
         ui::render(self, root_ui, frame);
         speed_test_ui::render_speed_test_viewport(&self.speed_test_ui, &ctx);
         stream_ui::render_stream_viewport(&self.stream_ui, self.cookie_args.clone(), &ctx);
+        render_converter_viewport(&self.converter_ui, &ctx);
     }
 
     fn on_exit(&mut self) {

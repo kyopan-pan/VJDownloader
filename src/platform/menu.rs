@@ -13,6 +13,7 @@ mod imp {
     static OPEN_LOGS_REQUEST: AtomicBool = AtomicBool::new(false);
     static OPEN_SPEED_TEST_REQUEST: AtomicBool = AtomicBool::new(false);
     static OPEN_STREAM_REQUEST: AtomicBool = AtomicBool::new(false);
+    static OPEN_CONVERTER_REQUEST: AtomicBool = AtomicBool::new(false);
     static MENU_INSTALLED: OnceLock<()> = OnceLock::new();
     static MENU_TARGET: OnceLock<usize> = OnceLock::new();
 
@@ -36,6 +37,10 @@ mod imp {
 
     pub fn take_open_stream_request() -> bool {
         OPEN_STREAM_REQUEST.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn take_open_converter_request() -> bool {
+        OPEN_CONVERTER_REQUEST.swap(false, Ordering::Relaxed)
     }
 
     fn install_settings_menu_inner() {
@@ -162,6 +167,32 @@ mod imp {
             let insert_index = if count > 4 { 4 } else { count };
             app_menu.insertItem_atIndex(&item, insert_index);
         }
+
+        if let Some(existing_converter) = find_existing_converter(&app_menu) {
+            unsafe {
+                existing_converter.setTarget(Some(target));
+                existing_converter.setAction(Some(sel!(openConverter:)));
+            }
+        } else {
+            let title = NSString::from_str("動画をMP4に変換...");
+            let key_equivalent = NSString::from_str("");
+            let item = mtm.alloc::<NSMenuItem>();
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    item,
+                    &title,
+                    Some(sel!(openConverter:)),
+                    &key_equivalent,
+                )
+            };
+            unsafe {
+                item.setTarget(Some(target));
+            }
+
+            let count = app_menu.numberOfItems();
+            let insert_index = if count > 5 { 5 } else { count };
+            app_menu.insertItem_atIndex(&item, insert_index);
+        }
     }
 
     fn find_existing_preferences(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
@@ -181,6 +212,11 @@ mod imp {
 
     fn find_existing_stream(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
         let titles = ["ストリーム再生...", "Stream..."];
+        find_existing_item_by_titles(menu, &titles)
+    }
+
+    fn find_existing_converter(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
+        let titles = ["動画をMP4に変換...", "Convert Video to MP4..."];
         find_existing_item_by_titles(menu, &titles)
     }
 
@@ -217,6 +253,10 @@ mod imp {
                     open_speed_test as extern "C" fn(_, _, _),
                 );
                 builder.add_method(sel!(openStream:), open_stream as extern "C" fn(_, _, _));
+                builder.add_method(
+                    sel!(openConverter:),
+                    open_converter as extern "C" fn(_, _, _),
+                );
             }
             builder.register()
         })
@@ -237,12 +277,16 @@ mod imp {
     extern "C" fn open_stream(_this: &AnyObject, _sel: Sel, _sender: *mut AnyObject) {
         OPEN_STREAM_REQUEST.store(true, Ordering::Relaxed);
     }
+
+    extern "C" fn open_converter(_this: &AnyObject, _sel: Sel, _sender: *mut AnyObject) {
+        OPEN_CONVERTER_REQUEST.store(true, Ordering::Relaxed);
+    }
 }
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    install_settings_menu, take_open_logs_request, take_open_settings_request,
-    take_open_speed_test_request, take_open_stream_request,
+    install_settings_menu, take_open_converter_request, take_open_logs_request,
+    take_open_settings_request, take_open_speed_test_request, take_open_stream_request,
 };
 
 #[cfg(not(target_os = "macos"))]
@@ -265,5 +309,10 @@ pub fn take_open_speed_test_request() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 pub fn take_open_stream_request() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn take_open_converter_request() -> bool {
     false
 }

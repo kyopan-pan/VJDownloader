@@ -1,5 +1,6 @@
 mod app;
 mod bundled;
+mod converter;
 mod cursor;
 mod download;
 mod fs_utils;
