@@ -25,7 +25,10 @@ default = ["syphon"]
 syphon = ["dep:objc2-metal", "dep:objc2-core-foundation"]
 
 [profile.dev]
+debug = 1
 debug-assertions = false
+split-debuginfo = "packed"
+incremental = false
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"

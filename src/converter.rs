@@ -101,7 +101,7 @@ pub fn render_converter_viewport(handle: &ConverterUiHandle, ctx: &egui::Context
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|file| file.path.clone())
+                .map(|file| file.path().to_path_buf())
                 .collect::<Vec<_>>()
         });
 
