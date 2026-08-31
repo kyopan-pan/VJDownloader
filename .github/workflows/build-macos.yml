@@ -56,9 +56,11 @@ jobs:
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
             SYMROOT="$PWD/build" \
             build
-          FW=$(find "$PWD/build" -name "Syphon.framework" -type d | head -1)
-          if [ -z "${FW}" ]; then
-            echo "Syphon.framework のビルド成果物が見つかりません" >&2
+          # build/EagerLinkingTBDs 配下にも同名の .tbd スタブができるため Release を直接指定
+          FW="$PWD/build/Release/Syphon.framework"
+          if [ ! -f "${FW}/Versions/A/Resources/Info.plist" ] || [ ! -f "${FW}/Versions/A/Syphon" ]; then
+            echo "Syphon.framework のビルド成果物が不完全です: ${FW}" >&2
+            ls -lR "${FW}" >&2 || true
             exit 1
           fi
           mkdir -p "${GITHUB_WORKSPACE}/third_party"
