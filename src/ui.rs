@@ -9,6 +9,12 @@ use crate::settings::ui as settings_ui;
 
 const PANEL_MIN_WIDTH: f32 = 120.0;
 const DOWNLOAD_PANEL_MAX_RATIO: f32 = 0.5;
+// Bot対策でダウンロードが拒否されたときのボタン色。
+const BOT_BLOCKED_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 38, 38);
+// Bot対策の遅延を示す警告色（進行度バー・枠線）。
+const BOT_WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(250, 204, 21);
+// 警告テキスト用の読みやすい黄色。
+const BOT_WARNING_TEXT_COLOR: egui::Color32 = egui::Color32::from_rgb(253, 224, 71);
 
 pub fn render(
     // UI全体の状態とアクションの入口
@@ -191,24 +197,40 @@ fn render_download_section(
     let panel_fill = egui::Color32::from_rgb(24, 30, 45);
     let panel_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 44, 62));
 
+    // Bot対策で失敗した直後は、ボタン自体を赤くして状態を明示する。
+    let restriction = app
+        .bot_guard
+        .restriction()
+        .map(|restriction| (restriction.label(), restriction.message.clone()));
+
     egui::Frame::NONE
         .fill(egui::Color32::from_rgb(15, 22, 36))
         .stroke(egui::Stroke::NONE)
         .corner_radius(egui::CornerRadius::same(18))
         .inner_margin(egui::Margin::symmetric(content_margin, content_margin))
         .show(ui, |ui| {
-            let (label, fill) = if app.download_in_progress {
-                ("Stop", egui::Color32::from_rgb(248, 113, 113))
+            let (label, fill, text_color) = if app.download_in_progress {
+                (
+                    "Stop",
+                    egui::Color32::from_rgb(248, 113, 113),
+                    egui::Color32::from_rgb(8, 14, 24),
+                )
+            } else if let Some((label, _)) = restriction.as_ref() {
+                (
+                    *label,
+                    BOT_BLOCKED_COLOR,
+                    egui::Color32::from_rgb(255, 240, 240),
+                )
             } else {
-                ("Download", egui::Color32::from_rgb(16, 190, 255))
+                (
+                    "Download",
+                    egui::Color32::from_rgb(16, 190, 255),
+                    egui::Color32::from_rgb(8, 14, 24),
+                )
             };
-            let button = egui::Button::new(
-                egui::RichText::new(label)
-                    .size(18.0)
-                    .color(egui::Color32::from_rgb(8, 14, 24)),
-            )
-            .fill(fill)
-            .corner_radius(egui::CornerRadius::same(18));
+            let button = egui::Button::new(egui::RichText::new(label).size(18.0).color(text_color))
+                .fill(fill)
+                .corner_radius(egui::CornerRadius::same(18));
 
             if pointing(ui.add_sized([ui.available_width(), 48.0], button)).clicked() {
                 if app.download_in_progress {
@@ -218,6 +240,15 @@ fn render_download_section(
                 }
             }
         });
+
+    if let Some((_, message)) = restriction.as_ref() {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(format!("{message}。数分待ってから再試行してください。"))
+                .size(11.5)
+                .color(egui::Color32::from_rgb(252, 165, 165)),
+        );
+    }
 
     ui.add_space(8.0);
     render_progress_panel(ui, ctx, app);
@@ -586,14 +617,21 @@ fn render_progress_panel(
     let idle = !app.progress_visible;
     let opacity = if idle { 0.6 } else { 1.0 };
 
+    // Bot対策の遅延を検出している間は、パネル全体を黄色系の警告表示に切り替える。
+    let warning = app.bot_guard.warning();
+
     let panel_fill = apply_opacity(
         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 13),
         opacity,
     );
-    let panel_stroke = apply_opacity(
-        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20),
-        opacity,
-    );
+    let panel_stroke = if warning.is_some() {
+        apply_opacity(BOT_WARNING_COLOR, 0.75)
+    } else {
+        apply_opacity(
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20),
+            opacity,
+        )
+    };
     let label_color = apply_opacity(egui::Color32::from_rgb(203, 213, 225), opacity);
 
     egui::Frame::NONE
@@ -618,6 +656,19 @@ fn render_progress_panel(
                     .color(label_color)
                     .strong(),
             );
+
+            if let Some(warning) = warning.as_ref() {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("⚠ {warning}"))
+                        .size(11.5)
+                        .color(BOT_WARNING_TEXT_COLOR)
+                        .strong(),
+                );
+                // 警告が期限切れになったタイミングで元の表示へ戻すため再描画を要求する。
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+
             ui.add_space(6.0);
 
             let bar_height = 12.0;
@@ -629,7 +680,11 @@ fn render_progress_panel(
                 egui::Color32::from_rgba_unmultiplied(255, 255, 255, 31),
                 opacity,
             );
-            let bar_fill = apply_opacity(egui::Color32::from_rgb(56, 189, 248), opacity);
+            let bar_fill = if warning.is_some() {
+                apply_opacity(BOT_WARNING_COLOR, opacity)
+            } else {
+                apply_opacity(egui::Color32::from_rgb(56, 189, 248), opacity)
+            };
             let rounding = egui::CornerRadius::same(8);
 
             ui.painter().rect_filled(rect, rounding, track_color);

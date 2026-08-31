@@ -1,8 +1,8 @@
 use crate::bundled::ensure_bundled_tools;
 use crate::converter::{ConversionEvent, ConverterUiHandle, render_converter_viewport};
 use crate::download::{
-    CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressUpdate, ensure_deno, ensure_yt_dlp,
-    read_clipboard_text, run_download,
+    BotGuardState, CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressUpdate, ensure_deno,
+    ensure_yt_dlp, is_youtube_url, read_clipboard_text, run_download,
 };
 use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
 use crate::logs::AppLogger;
@@ -76,6 +76,7 @@ pub struct DownloaderApp {
     pub(crate) cancel_flag: Option<Arc<AtomicBool>>,
     pub(crate) process_tracker: Option<ProcessTracker>,
     pub(crate) rx: Option<mpsc::Receiver<DownloadEvent>>,
+    pub(crate) bot_guard: BotGuardState,
     pub(crate) last_scan: Instant,
     pub(crate) refresh_needed: bool,
     pub(crate) settings_ui: settings_ui::SettingsUiHandle,
@@ -169,6 +170,7 @@ impl DownloaderApp {
             cancel_flag: None,
             process_tracker: None,
             rx: None,
+            bot_guard: BotGuardState::new(),
             last_scan: Instant::now() - Duration::from_secs(5),
             refresh_needed: true,
             settings_ui: settings_ui::SettingsUiHandle::new(),
@@ -241,6 +243,9 @@ impl DownloaderApp {
             self.settings_ui.open_initial_setup();
             return;
         }
+
+        // 前回のBot対策検出（赤ボタン・警告）は再試行の開始時点で解除する。
+        self.bot_guard.begin_run(is_youtube_url(&url));
 
         let output_dir = self.download_dir.clone();
         let cookie_args = self.cookie_args.clone();
@@ -367,17 +372,35 @@ impl DownloaderApp {
                     }
                 }
                 DownloadEvent::Progress(update) => self.handle_progress_update(update),
+                DownloadEvent::Guard(notice) => {
+                    if !cancelling {
+                        self.bot_guard.observe(&notice);
+                    }
+                }
                 DownloadEvent::Done(result, elapsed) => done = Some((result, elapsed)),
             }
         }
 
         if let Some((result, elapsed)) = done {
+            // キャンセルはBot対策由来の失敗として扱わない。
+            let failed = matches!(&result, Err(err) if err != CANCELLED_ERROR);
+            self.bot_guard.finish_run(failed);
             match result {
                 Ok(()) => self.push_status(format!("Download completed. Total time: {elapsed}")),
                 Err(err) if err == CANCELLED_ERROR => {
                     self.push_status("ダウンロードをキャンセルしました。".to_string())
                 }
                 Err(err) => self.push_status(format!("Download failed: {err}")),
+            }
+            let restriction_status = self.bot_guard.restriction().map(|restriction| {
+                format!(
+                    "{}: {}。数分待ってから再試行してください。",
+                    restriction.label(),
+                    restriction.message
+                )
+            });
+            if let Some(message) = restriction_status {
+                self.push_status(message);
             }
             self.download_in_progress = false;
             self.download_active_flag.store(false, Ordering::Relaxed);

@@ -1,4 +1,5 @@
 pub(crate) mod animethemes;
+mod guard;
 mod process;
 mod staging;
 mod tools;
@@ -16,11 +17,14 @@ use crate::bundled::ensure_bundled_tools;
 use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{ffmpeg_path, yt_dlp_path};
 
+pub use guard::{BotGuardState, GuardNotice, is_youtube_url};
 pub use tools::{ensure_deno, ensure_yt_dlp, js_runtime_arg, update_deno, update_yt_dlp};
 
 pub enum DownloadEvent {
     Log(String),
     Progress(ProgressUpdate),
+    // Bot対策（403/429 や待機）を検出したときの通知。
+    Guard(GuardNotice),
     Done(Result<(), String>, String),
 }
 

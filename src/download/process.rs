@@ -7,6 +7,7 @@ use std::thread;
 
 use crate::paths::bin_dir;
 
+use super::guard;
 use super::{CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressContext, ProgressUpdate};
 
 // 子プロセスを強制終了して wait まで行い、プロセスを確実に回収する。
@@ -229,6 +230,7 @@ fn handle_stream_line(
     }
 
     handle_progress_line(trimmed, progress, tx);
+    guard::notify(trimmed, tx);
 
     let _ = tx.send(DownloadEvent::Log(trimmed.to_string()));
 }
