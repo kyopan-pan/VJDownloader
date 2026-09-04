@@ -1,0 +1,34 @@
+use std::path::{Path, PathBuf};
+
+use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+use objc2_foundation::{MainThreadMarker, NSString, NSURL};
+
+pub fn choose_directory(current: Option<&Path>) -> Option<PathBuf> {
+    let mtm = MainThreadMarker::new()?;
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setAllowsMultipleSelection(false);
+
+    if let Some(path) = current {
+        if let Some(path_str) = path.to_str() {
+            let ns_path = NSString::from_str(path_str);
+            let url = NSURL::fileURLWithPath_isDirectory(&ns_path, true);
+            panel.setDirectoryURL(Some(&url));
+        }
+    }
+
+    let response = panel.runModal();
+    if response != NSModalResponseOK {
+        return None;
+    }
+
+    let urls = panel.URLs();
+    if urls.count() == 0 {
+        return None;
+    }
+
+    let url = urls.objectAtIndex(0);
+    let path_ns = url.path()?;
+    Some(PathBuf::from(path_ns.to_string()))
+}
