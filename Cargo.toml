@@ -37,3 +37,14 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSAp
 # Syphon 出力用（`syphon` フィーチャー時のみ）。
 objc2-metal = { version = "0.3.2", optional = true }
 objc2-core-foundation = { version = "0.3.2", optional = true, features = ["CFCGTypes"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Win32 API バインディング。フォルダ選択（IFileOpenDialog）とIME状態取得（IMM32）に使用する。
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

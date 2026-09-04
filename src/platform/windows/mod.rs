@@ -1,10 +1,11 @@
-// Windows 実装。
-//
-// 現時点では公開APIの形だけを揃えた未実装スタブであり、中身は macOS 版と同じ
-// 「何もしない」挙動（移設前の `not(target_os = "macos")` スタブと同等）である。
-// 各ファイルの TODO(windows) が実装すべき内容を示す。
-//
+// Windows 実装。Win32 API（COM / IMM32）を直接呼ぶコードはこの配下に閉じ込める。
 // この配下は target_os = "windows" のときのみコンパイルされるため、各ファイルに cfg は不要。
+//
+// 実装状況:
+// - file_dialog  : 実装済み（IFileOpenDialog）
+// - input_source : 実装済み（GetKeyboardLayout + IMM32）
+// - menu         : フラグ受け渡しのみ実装。アプリ内メニュー UI の追加が未完（TODO(windows) 参照）
+// - window       : Windows では処理不要のため恒久的に no-op
 
 pub mod file_dialog;
 pub mod input_source;
