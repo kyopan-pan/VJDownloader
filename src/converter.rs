@@ -353,14 +353,12 @@ fn convert_to_mp4(
     let temporary = output_dir.join(format!(".{}.converting", file_name.to_string_lossy()));
 
     let _ = event_tx.send(ConversionEvent::Log(
-        "ffmpeg: h264_videotoolboxで変換します。".to_string(),
+        LOG_CONVERT_WITH_VIDEOTOOLBOX.to_string(),
     ));
     let mut result = run_ffmpeg_conversion(&ffmpeg, input, &temporary, true, event_tx, ctx)?;
     if !result.status.success() {
         let _ = fs::remove_file(&temporary);
-        let _ = event_tx.send(ConversionEvent::Log(
-            "ffmpeg: VideoToolboxを利用できないためlibx264で再試行します。".to_string(),
-        ));
+        let _ = event_tx.send(ConversionEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
         ctx.request_repaint_of(egui::ViewportId::ROOT);
         result = run_ffmpeg_conversion(&ffmpeg, input, &temporary, false, event_tx, ctx)?;
     }
@@ -382,14 +380,19 @@ fn convert_to_mp4(
     Ok(output)
 }
 
-fn run_ffmpeg_conversion(
+// 変換開始とエンコーダ切り替えのログ文言。変換ウィンドウとダウンロード後の変換で共有する。
+pub(crate) const LOG_CONVERT_WITH_VIDEOTOOLBOX: &str = "ffmpeg: h264_videotoolboxで変換します。";
+pub(crate) const LOG_RETRY_WITH_LIBX264: &str =
+    "ffmpeg: VideoToolboxを利用できないためlibx264で再試行します。";
+
+// 既定フォーマット（H.264 MP4）へ変換する ffmpeg コマンドを組み立てる。
+// 変換ウィンドウとダウンロード後の変換で同じ設定を共有する。
+pub(crate) fn default_mp4_command(
     ffmpeg: &Path,
     input: &Path,
     output: &Path,
     use_videotoolbox: bool,
-    event_tx: &mpsc::Sender<ConversionEvent>,
-    ctx: &egui::Context,
-) -> Result<FfmpegOutput, String> {
+) -> Command {
     let mut command = Command::new(ffmpeg);
     command
         .arg("-hide_banner")
@@ -407,9 +410,20 @@ fn run_ffmpeg_conversion(
         .args(["-b:v", "5M", "-pix_fmt", "yuv420p"])
         .args(["-c:a", "aac", "-b:a", "192k"])
         .args(["-movflags", "+faststart", "-f", "mp4", "-y"])
-        .arg(output)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .arg(output);
+    command
+}
+
+fn run_ffmpeg_conversion(
+    ffmpeg: &Path,
+    input: &Path,
+    output: &Path,
+    use_videotoolbox: bool,
+    event_tx: &mpsc::Sender<ConversionEvent>,
+    ctx: &egui::Context,
+) -> Result<FfmpegOutput, String> {
+    let mut command = default_mp4_command(ffmpeg, input, output, use_videotoolbox);
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
 
     let mut child = command
         .spawn()
@@ -520,7 +534,7 @@ fn unique_output_path(input: &Path, output_dir: &Path) -> PathBuf {
     unreachable!()
 }
 
-fn truncate_error(error: &str) -> String {
+pub(crate) fn truncate_error(error: &str) -> String {
     const MAX_CHARS: usize = 500;
     let mut chars = error.chars();
     let text = chars.by_ref().take(MAX_CHARS).collect::<String>();

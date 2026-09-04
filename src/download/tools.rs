@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{bin_dir, deno_path, yt_dlp_path};
 
-use super::DownloadEvent;
+use super::{DownloadEvent, DownloadMode};
 
 // 途中で切れたダウンロードを壊れたバイナリとして扱うための下限サイズ。
 const MIN_TOOL_BYTES: u64 = 1024 * 1024;
@@ -345,12 +345,8 @@ pub fn js_runtime_arg() -> String {
     }
 }
 
-// yt-dlp の通常ダウンロード用引数セットを組み立てる。
-pub(super) fn base_yt_dlp_args(
-    ffmpeg_path: &str,
-    cookie_args: &[String],
-    js_runtime: &str,
-) -> Vec<String> {
+// ダウンロード仕様に関わらず共通で渡す引数セットを組み立てる。
+fn common_yt_dlp_args(cookie_args: &[String]) -> Vec<String> {
     let mut args = vec!["--no-playlist".to_string()];
     args.extend(cookie_args.iter().cloned());
     args.extend(vec![
@@ -360,51 +356,83 @@ pub(super) fn base_yt_dlp_args(
         "youtube:skip=translated_subs".to_string(),
         "--concurrent-fragments".to_string(),
         "4".to_string(),
-        "-S".to_string(),
-        "vcodec:h264,res,acodec:m4a".to_string(),
-        "--match-filter".to_string(),
-        "vcodec~='(?i)^(avc|h264)'".to_string(),
     ]);
+    args
+}
 
-    args.push("--merge-output-format".to_string());
-    args.push("mp4".to_string());
+// ffmpeg と JS ランタイムの場所指定を末尾へ追加する。
+fn append_runtime_args(args: &mut Vec<String>, ffmpeg_path: &str, js_runtime: &str) {
     args.push("--ffmpeg-location".to_string());
     args.push(ffmpeg_path.to_string());
     args.push("--js-runtimes".to_string());
     args.push(js_runtime.to_string());
+}
 
+// H.264 を優先して取得する引数。max_height を指定した場合はその解像度を上限にする。
+fn h264_priority_args(max_height: Option<u32>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(height) = max_height {
+        args.push("-f".to_string());
+        args.push(format!("bv*[height<={height}]+ba/b[height<={height}]"));
+    }
+    args.push("-S".to_string());
+    args.push("vcodec:h264,res,acodec:m4a".to_string());
+    args.push("--match-filter".to_string());
+    args.push("vcodec~='(?i)^(avc|h264)'".to_string());
+    args.push("--merge-output-format".to_string());
+    args.push("mp4".to_string());
+    args
+}
+
+// yt-dlp の通常ダウンロード用引数セットを、選択中のダウンロード仕様に合わせて組み立てる。
+pub(super) fn base_yt_dlp_args(
+    mode: DownloadMode,
+    ffmpeg_path: &str,
+    cookie_args: &[String],
+    js_runtime: &str,
+) -> Vec<String> {
+    let mut args = common_yt_dlp_args(cookie_args);
+    match mode {
+        DownloadMode::Standard => args.extend(h264_priority_args(None)),
+        DownloadMode::UpTo1080p => args.extend(h264_priority_args(Some(1080))),
+        DownloadMode::BestThenConvert => {
+            // コーデックを制限せず最高画質を取得する。変換はダウンロード後に自前の ffmpeg で行うため、
+            // どのコーデックでも失敗しない mkv へ結合しておく。
+            args.push("-f".to_string());
+            args.push("bv*+ba/b".to_string());
+            args.push("--merge-output-format".to_string());
+            args.push("mkv".to_string());
+        }
+    }
+    append_runtime_args(&mut args, ffmpeg_path, js_runtime);
     args
 }
 
 // H.264 優先モードが失敗した場合のフォールバック引数セットを組み立てる。
+// 最高画質モードはコーデックを制限しないため、再試行する余地がなく None を返す。
 pub(super) fn fallback_yt_dlp_args(
+    mode: DownloadMode,
     ffmpeg_path: &str,
     cookie_args: &[String],
     js_runtime: &str,
-) -> Vec<String> {
-    let mut args = vec!["--no-playlist".to_string()];
-    args.extend(cookie_args.iter().cloned());
-    args.extend(vec![
-        "--extractor-args".to_string(),
-        "youtube:player_client=web".to_string(),
-        "--extractor-args".to_string(),
-        "youtube:skip=translated_subs".to_string(),
-        "--concurrent-fragments".to_string(),
-        "4".to_string(),
-    ]);
+) -> Option<Vec<String>> {
+    let max_height = match mode {
+        DownloadMode::Standard => 720,
+        DownloadMode::UpTo1080p => 1080,
+        DownloadMode::BestThenConvert => return None,
+    };
 
+    let mut args = common_yt_dlp_args(cookie_args);
     args.push("-f".to_string());
-    args.push("bv*[height<=720]+ba/b[height<=720]".to_string());
+    args.push(format!(
+        "bv*[height<={max_height}]+ba/b[height<={max_height}]"
+    ));
     args.push("--recode-video".to_string());
     args.push("mp4".to_string());
     args.push("--postprocessor-args".to_string());
     args.push("VideoConvertor:-c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p".to_string());
-    args.push("--ffmpeg-location".to_string());
-    args.push(ffmpeg_path.to_string());
-    args.push("--js-runtimes".to_string());
-    args.push(js_runtime.to_string());
-
-    args
+    append_runtime_args(&mut args, ffmpeg_path, js_runtime);
+    Some(args)
 }
 
 fn detect_deno_binary() -> Option<PathBuf> {

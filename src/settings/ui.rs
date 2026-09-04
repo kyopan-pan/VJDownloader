@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::DownloaderApp;
 use crate::cursor::pointing;
-use crate::download::{ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
+use crate::download::{DownloadMode, ensure_deno, ensure_yt_dlp, update_deno, update_yt_dlp};
 use crate::fs_utils::is_executable;
 use crate::paths::{default_download_dir, deno_path, make_absolute_path, yt_dlp_path};
 use crate::platform::file_dialog as mac_file_dialog;
@@ -547,6 +547,8 @@ fn render_settings_contents(
                     let mut settings_changed =
                         render_window_section(ui, state);
                     ui.add_space(10.0);
+                    settings_changed |= render_download_mode_section(ui, state);
+                    ui.add_space(10.0);
                     settings_changed |= render_cookie_section(ui, state);
                     ui.add_space(10.0);
                     let (request_reindex, search_roots_changed) =
@@ -607,6 +609,19 @@ fn settings_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("settings_viewport")
 }
 
+// 設定画面のセクション共通のパネル枠。仕様どおり横幅を画面いっぱいに揃える。
+fn section_frame(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgb(20, 26, 40))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78)))
+        .corner_radius(egui::CornerRadius::same(16))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            add_contents(ui);
+        });
+}
+
 fn render_window_section(
     // ウィンドウ設定セクションの描画先
     ui: &mut egui::Ui,
@@ -614,86 +629,141 @@ fn render_window_section(
     state: &mut SettingsUiState,
 ) -> bool {
     let mut changed = false;
-    let panel_fill = egui::Color32::from_rgb(20, 26, 40);
-    let panel_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78));
 
-    egui::Frame::NONE
-        .fill(panel_fill)
-        .stroke(panel_stroke)
-        .corner_radius(egui::CornerRadius::same(16))
-        .inner_margin(egui::Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(14.0, 12.0);
-            egui::Grid::new("settings-grid")
-                .num_columns(2)
-                .spacing(egui::vec2(16.0, 12.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("画面幅")
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(150, 160, 180)),
-                    );
-                    changed |=
-                        add_text_input(ui, &mut state.form.data.window_width, 120.0, "例: 320")
-                            .changed();
-                    ui.end_row();
+    section_frame(ui, |ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(14.0, 12.0);
+        egui::Grid::new("settings-grid")
+            .num_columns(2)
+            .spacing(egui::vec2(16.0, 12.0))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("画面幅")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(150, 160, 180)),
+                );
+                changed |= add_text_input(ui, &mut state.form.data.window_width, 120.0, "例: 320")
+                    .changed();
+                ui.end_row();
 
-                    ui.label(
-                        egui::RichText::new("画面高さ")
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(150, 160, 180)),
-                    );
-                    changed |=
-                        add_text_input(ui, &mut state.form.data.window_height, 120.0, "例: 1000")
-                            .changed();
-                    ui.end_row();
-
-                    ui.label(
-                        egui::RichText::new("出力先フォルダ")
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(150, 160, 180)),
-                    );
-                    let mut selected_dir = None;
-                    ui.horizontal(|ui| {
-                        let input_width = (ui.available_width() - 120.0).max(200.0);
-                        let default_hint_path = default_download_dir();
-                        let default_hint = default_hint_path.to_string_lossy();
-                        changed |= add_text_input(
-                            ui,
-                            &mut state.form.data.download_dir,
-                            input_width,
-                            default_hint.as_ref(),
-                        )
+                ui.label(
+                    egui::RichText::new("画面高さ")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(150, 160, 180)),
+                );
+                changed |=
+                    add_text_input(ui, &mut state.form.data.window_height, 120.0, "例: 1000")
                         .changed();
-                        let pick_btn = egui::Button::new(
-                            egui::RichText::new("フォルダを選択")
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(180, 200, 220)),
-                        )
-                        .fill(egui::Color32::from_rgb(26, 34, 52));
-                        if pointing(ui.add(pick_btn)).clicked() {
-                            let current = state.form.data.download_dir.trim();
-                            let current_path = if current.is_empty() {
-                                None
-                            } else {
-                                Some(PathBuf::from(current))
-                            };
-                            selected_dir =
-                                mac_file_dialog::choose_directory(current_path.as_deref());
-                        }
-                    });
-                    if let Some(path) = selected_dir {
-                        let selected = path.to_string_lossy().to_string();
-                        if state.form.data.download_dir != selected {
-                            state.form.data.download_dir = selected;
-                            changed = true;
-                        }
+                ui.end_row();
+
+                ui.label(
+                    egui::RichText::new("出力先フォルダ")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(150, 160, 180)),
+                );
+                let mut selected_dir = None;
+                ui.horizontal(|ui| {
+                    let input_width = (ui.available_width() - 120.0).max(200.0);
+                    let default_hint_path = default_download_dir();
+                    let default_hint = default_hint_path.to_string_lossy();
+                    changed |= add_text_input(
+                        ui,
+                        &mut state.form.data.download_dir,
+                        input_width,
+                        default_hint.as_ref(),
+                    )
+                    .changed();
+                    let pick_btn = egui::Button::new(
+                        egui::RichText::new("フォルダを選択")
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(180, 200, 220)),
+                    )
+                    .fill(egui::Color32::from_rgb(26, 34, 52));
+                    if pointing(ui.add(pick_btn)).clicked() {
+                        let current = state.form.data.download_dir.trim();
+                        let current_path = if current.is_empty() {
+                            None
+                        } else {
+                            Some(PathBuf::from(current))
+                        };
+                        selected_dir = mac_file_dialog::choose_directory(current_path.as_deref());
                     }
-                    ui.end_row();
                 });
-        });
+                if let Some(path) = selected_dir {
+                    let selected = path.to_string_lossy().to_string();
+                    if state.form.data.download_dir != selected {
+                        state.form.data.download_dir = selected;
+                        changed = true;
+                    }
+                }
+                ui.end_row();
+            });
+    });
 
     changed
+}
+
+fn render_download_mode_section(
+    // ダウンロード仕様セクションの描画先
+    ui: &mut egui::Ui,
+    // 選択中のダウンロード仕様を保持する設定UI
+    state: &mut SettingsUiState,
+) -> bool {
+    let mut changed = false;
+
+    section_frame(ui, |ui| {
+        ui.label(
+            egui::RichText::new("ダウンロード仕様")
+                .size(13.0)
+                .color(egui::Color32::from_rgb(200, 210, 230)),
+        );
+        ui.label(
+                egui::RichText::new(
+                    "画質と変換の方針を選びます。各項目にカーソルを合わせると詳細を表示します。次回のダウンロードから適用されます。",
+                )
+                .size(11.5)
+                .color(egui::Color32::from_rgb(140, 150, 170)),
+            );
+        ui.add_space(6.0);
+
+        for mode in DownloadMode::ALL {
+            // 説明は画面を煩雑にしないため、ホバー時の注意書きとして表示する。
+            changed |= pointing(ui.radio_value(
+                &mut state.form.data.download_mode,
+                mode,
+                egui::RichText::new(mode.label()).size(12.5),
+            ))
+            .on_hover_ui(|ui| render_download_mode_hint(ui, mode))
+            .changed();
+            ui.add_space(2.0);
+        }
+    });
+
+    changed
+}
+
+// ダウンロード仕様の詳細と注意点をホバー時の吹き出しへ描画する。
+fn render_download_mode_hint(ui: &mut egui::Ui, mode: DownloadMode) {
+    ui.set_max_width(300.0);
+    ui.label(
+        egui::RichText::new(mode.label())
+            .size(12.0)
+            .strong()
+            .color(egui::Color32::from_rgb(220, 230, 245)),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(mode.description())
+            .size(11.5)
+            .color(egui::Color32::from_rgb(180, 190, 210)),
+    );
+    if let Some(caution) = mode.caution() {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!("注意: {caution}"))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(251, 191, 36)),
+        );
+    }
 }
 
 fn render_cookie_section(
@@ -703,74 +773,67 @@ fn render_cookie_section(
     state: &mut SettingsUiState,
 ) -> bool {
     let mut changed = false;
-    let panel_fill = egui::Color32::from_rgb(20, 26, 40);
-    let panel_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78));
 
-    egui::Frame::NONE
-        .fill(panel_fill)
-        .stroke(panel_stroke)
-        .corner_radius(egui::CornerRadius::same(16))
-        .inner_margin(egui::Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("YouTube認証")
-                    .size(13.0)
-                    .color(egui::Color32::from_rgb(200, 210, 230)),
-            );
-            ui.label(
+    section_frame(ui, |ui| {
+        ui.label(
+            egui::RichText::new("YouTube認証")
+                .size(13.0)
+                .color(egui::Color32::from_rgb(200, 210, 230)),
+        );
+        ui.label(
                 egui::RichText::new(
                     "bot確認が出る場合のみ有効化してください。ブラウザ名とプロファイルはyt-dlpの--cookies-from-browserに渡されます。",
                 )
                 .size(11.5)
                 .color(egui::Color32::from_rgb(140, 150, 170)),
             );
-            ui.add_space(6.0);
-            changed |= pointing(ui.checkbox(
-                &mut state.form.data.cookies_enabled,
-                "ブラウザのクッキーを使う（bot確認対策）",
-            ))
-            .changed();
-            ui.add_space(6.0);
+        ui.add_space(6.0);
+        changed |= pointing(ui.checkbox(
+            &mut state.form.data.cookies_enabled,
+            "ブラウザのクッキーを使う（bot確認対策）",
+        ))
+        .changed();
+        ui.add_space(6.0);
 
-            egui::Grid::new("cookies-grid")
-                .num_columns(2)
-                .spacing(egui::vec2(16.0, 12.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("ブラウザ名")
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(150, 160, 180)),
-                    );
-                    let browser_hint = "例: chrome / firefox / safari";
-                    let browser_enabled = state.form.data.cookies_enabled;
-                    changed |= ui
-                        .add_enabled_ui(browser_enabled, |ui| {
-                            add_text_input(
-                                ui,
-                                &mut state.form.data.cookies_browser,
-                                220.0,
-                                browser_hint,
-                            )
-                            .changed()
-                        })
-                        .inner;
-                    ui.end_row();
+        egui::Grid::new("cookies-grid")
+            .num_columns(2)
+            .spacing(egui::vec2(16.0, 12.0))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("ブラウザ名")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(150, 160, 180)),
+                );
+                let browser_hint = "例: chrome / firefox / safari";
+                let browser_enabled = state.form.data.cookies_enabled;
+                changed |= ui
+                    .add_enabled_ui(browser_enabled, |ui| {
+                        add_text_input(
+                            ui,
+                            &mut state.form.data.cookies_browser,
+                            220.0,
+                            browser_hint,
+                        )
+                        .changed()
+                    })
+                    .inner;
+                ui.end_row();
 
-                    ui.label(
-                        egui::RichText::new("プロファイル")
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(150, 160, 180)),
-                    );
-                    let profile_hint = "例: Default / Profile 1";
-                    let profile_enabled = state.form.data.cookies_enabled;
-                    changed |= ui
-                        .add_enabled_ui(profile_enabled, |ui| {
-                            render_profile_input(ui, state, 220.0, profile_hint)
-                        })
-                        .inner;
-                    ui.end_row();
-                });
-        });
+                ui.label(
+                    egui::RichText::new("プロファイル")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(150, 160, 180)),
+                );
+                let profile_hint = "例: Default / Profile 1";
+                let profile_enabled = state.form.data.cookies_enabled;
+                changed |= ui
+                    .add_enabled_ui(profile_enabled, |ui| {
+                        render_profile_input(ui, state, 220.0, profile_hint)
+                    })
+                    .inner;
+                ui.end_row();
+            });
+    });
 
     changed
 }
@@ -864,88 +927,81 @@ fn chrome_profile_label(profile: &ChromeProfile) -> String {
 }
 
 fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -> (bool, bool) {
-    let panel_fill = egui::Color32::from_rgb(20, 26, 40);
-    let panel_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 56, 78));
     let mut should_reindex = false;
     let mut remove_index = None;
     let mut add_directory = None;
     let mut changed = false;
     let indexing = matches!(state.index_update_state, SettingsIndexUpdateState::Updating);
 
-    egui::Frame::NONE
-        .fill(panel_fill)
-        .stroke(panel_stroke)
-        .corner_radius(egui::CornerRadius::same(16))
-        .inner_margin(egui::Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("検索対象フォルダ")
-                        .size(13.0)
-                        .color(egui::Color32::from_rgb(200, 210, 230)),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let btn = egui::Button::new(
-                        egui::RichText::new("全体を再インデックス")
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(8, 14, 24)),
-                    )
-                    .fill(egui::Color32::from_rgb(16, 190, 255));
-                    if pointing(ui.add_enabled(!indexing, btn)).clicked() {
-                        should_reindex = true;
-                    }
-                });
-            });
+    section_frame(ui, |ui| {
+        ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("動画検索対象のルートフォルダを複数指定できます。")
-                    .size(11.5)
-                    .color(egui::Color32::from_rgb(140, 150, 170)),
+                egui::RichText::new("検索対象フォルダ")
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(200, 210, 230)),
             );
-            ui.add_space(8.0);
-
-            let btn = egui::Button::new(
-                egui::RichText::new("フォルダを追加")
-                    .size(11.5)
-                    .color(egui::Color32::from_rgb(180, 200, 220)),
-            )
-            .fill(egui::Color32::from_rgb(26, 34, 52));
-            if pointing(ui.add(btn)).clicked() {
-                let current = state.form.data.search_roots.last().map(PathBuf::from);
-                add_directory = mac_file_dialog::choose_directory(current.as_deref());
-            }
-
-            ui.add_space(6.0);
-            if state.form.data.search_roots.is_empty() {
-                ui.label(
-                    egui::RichText::new("検索対象フォルダが未設定です。")
-                        .size(11.5)
-                        .color(egui::Color32::from_rgb(120, 130, 150)),
-                );
-            } else {
-                for (index, root) in state.form.data.search_roots.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(root)
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(170, 180, 200)),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let remove_btn = egui::Button::new(
-                                egui::RichText::new("削除")
-                                    .size(10.5)
-                                    .color(egui::Color32::from_rgb(248, 113, 113)),
-                            )
-                            .fill(egui::Color32::from_rgb(45, 26, 34));
-                            if pointing(ui.add(remove_btn)).clicked() {
-                                remove_index = Some(index);
-                            }
-                        });
-                    });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let btn = egui::Button::new(
+                    egui::RichText::new("全体を再インデックス")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(8, 14, 24)),
+                )
+                .fill(egui::Color32::from_rgb(16, 190, 255));
+                if pointing(ui.add_enabled(!indexing, btn)).clicked() {
+                    should_reindex = true;
                 }
-            }
-
-            render_index_update_status(ui, state);
+            });
         });
+        ui.label(
+            egui::RichText::new("動画検索対象のルートフォルダを複数指定できます。")
+                .size(11.5)
+                .color(egui::Color32::from_rgb(140, 150, 170)),
+        );
+        ui.add_space(8.0);
+
+        let btn = egui::Button::new(
+            egui::RichText::new("フォルダを追加")
+                .size(11.5)
+                .color(egui::Color32::from_rgb(180, 200, 220)),
+        )
+        .fill(egui::Color32::from_rgb(26, 34, 52));
+        if pointing(ui.add(btn)).clicked() {
+            let current = state.form.data.search_roots.last().map(PathBuf::from);
+            add_directory = mac_file_dialog::choose_directory(current.as_deref());
+        }
+
+        ui.add_space(6.0);
+        if state.form.data.search_roots.is_empty() {
+            ui.label(
+                egui::RichText::new("検索対象フォルダが未設定です。")
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(120, 130, 150)),
+            );
+        } else {
+            for (index, root) in state.form.data.search_roots.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(root)
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(170, 180, 200)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let remove_btn = egui::Button::new(
+                            egui::RichText::new("削除")
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(248, 113, 113)),
+                        )
+                        .fill(egui::Color32::from_rgb(45, 26, 34));
+                        if pointing(ui.add(remove_btn)).clicked() {
+                            remove_index = Some(index);
+                        }
+                    });
+                });
+            }
+        }
+
+        render_index_update_status(ui, state);
+    });
 
     if let Some(path) = add_directory {
         let value = path.to_string_lossy().to_string();
@@ -1296,6 +1352,7 @@ pub fn process_requests(app: &mut DownloaderApp, ctx: &egui::Context) {
                 app.refresh_needed = true;
                 app.pending_window_resize = Some(applied.window_size);
                 app.cookie_args = cookie_args_from_settings(&applied.data);
+                app.download_mode = applied.data.download_mode;
                 app.settings_ui
                     .send_result(SettingsResult::Saved(applied.data));
                 ctx.request_repaint_of(settings_viewport_id());

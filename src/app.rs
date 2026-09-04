@@ -1,8 +1,8 @@
 use crate::bundled::ensure_bundled_tools;
 use crate::converter::{ConversionEvent, ConverterUiHandle, render_converter_viewport};
 use crate::download::{
-    BotGuardState, CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressUpdate, ensure_deno,
-    ensure_yt_dlp, is_youtube_url, read_clipboard_text, run_download,
+    BotGuardState, CANCELLED_ERROR, DownloadEvent, DownloadMode, ProcessTracker, ProgressUpdate,
+    ensure_deno, ensure_yt_dlp, is_youtube_url, read_clipboard_text, run_download,
 };
 use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
 use crate::logs::AppLogger;
@@ -81,6 +81,7 @@ pub struct DownloaderApp {
     pub(crate) refresh_needed: bool,
     pub(crate) settings_ui: settings_ui::SettingsUiHandle,
     pub(crate) cookie_args: Vec<String>,
+    pub(crate) download_mode: DownloadMode,
     pub(crate) log_ui: Arc<Mutex<LogUiState>>,
     pub(crate) speed_test_ui: Arc<Mutex<SpeedTestUiState>>,
     pub(crate) stream_ui: Arc<Mutex<StreamUiState>>,
@@ -175,6 +176,7 @@ impl DownloaderApp {
             refresh_needed: true,
             settings_ui: settings_ui::SettingsUiHandle::new(),
             cookie_args: cookie_args_from_settings(&settings),
+            download_mode: settings.download_mode,
             log_ui: Arc::new(Mutex::new(LogUiState::new())),
             speed_test_ui: Arc::new(Mutex::new(SpeedTestUiState::new())),
             stream_ui: Arc::new(Mutex::new(StreamUiState::new())),
@@ -249,6 +251,7 @@ impl DownloaderApp {
 
         let output_dir = self.download_dir.clone();
         let cookie_args = self.cookie_args.clone();
+        let download_mode = self.download_mode;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.download_in_progress = true;
@@ -266,6 +269,7 @@ impl DownloaderApp {
                 url,
                 output_dir,
                 cookie_args,
+                download_mode,
                 tx,
                 active_flag,
                 cancel_flag,

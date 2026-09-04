@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::download::DownloadMode;
 use crate::paths::{default_download_dir, make_absolute_path, settings_file_path};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +20,7 @@ pub struct SettingsData {
     pub download_panel_width: String,
     pub search_panel_width: String,
     pub download_dir: String,
+    pub download_mode: DownloadMode,
     pub search_roots: Vec<String>,
     pub cookies_enabled: bool,
     pub cookies_browser: String,
@@ -54,6 +56,10 @@ impl SettingsData {
             .unwrap_or_else(default_download_dir)
             .to_string_lossy()
             .to_string();
+        let download_mode = props
+            .get("download.mode")
+            .and_then(|value| DownloadMode::from_key(value))
+            .unwrap_or_default();
         let search_roots = props
             .get("search.roots")
             .map(|value| decode_path_list(value))
@@ -79,6 +85,7 @@ impl SettingsData {
             download_panel_width: format_dimension(download_panel_width),
             search_panel_width: format_dimension(search_panel_width),
             download_dir,
+            download_mode,
             search_roots,
             cookies_enabled,
             cookies_browser,
@@ -108,6 +115,7 @@ impl SettingsData {
         ));
         let download_dir = self.download_dir.trim();
         lines.push(format!("download.dir={download_dir}"));
+        lines.push(format!("download.mode={}", self.download_mode.as_key()));
         lines.push(format!(
             "search.roots={}",
             encode_path_list(&self.search_roots)

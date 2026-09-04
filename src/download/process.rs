@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::{BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -5,6 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
+use crate::converter::{
+    LOG_CONVERT_WITH_VIDEOTOOLBOX, LOG_RETRY_WITH_LIBX264, default_mp4_command, truncate_error,
+};
 use crate::paths::bin_dir;
 
 use super::guard;
@@ -128,6 +132,78 @@ pub(super) fn run_pipe_to_ffmpeg_or_cancel(
     }
 }
 
+// ダウンロード済みファイルを既定フォーマット（H.264 MP4）へ変換する。
+// VideoToolbox が使えない環境では libx264 で再試行する。
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_default_format_convert(
+    ffmpeg: &Path,
+    input: &Path,
+    output: &Path,
+    tx: &mpsc::Sender<DownloadEvent>,
+    progress: &Arc<ProgressContext>,
+    tracker: &ProcessTracker,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    let _ = tx.send(DownloadEvent::Log(
+        LOG_CONVERT_WITH_VIDEOTOOLBOX.to_string(),
+    ));
+    let (status, _) = run_convert_command(ffmpeg, input, output, true, tx, progress, tracker)?;
+    if status.success() {
+        return Ok(());
+    }
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(CANCELLED_ERROR.to_string());
+    }
+
+    let _ = fs::remove_file(output);
+    let _ = tx.send(DownloadEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
+    let (status, stderr) =
+        run_convert_command(ffmpeg, input, output, false, tx, progress, tracker)?;
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(CANCELLED_ERROR.to_string());
+    }
+    if !status.success() {
+        let detail = stderr.trim();
+        return Err(if detail.is_empty() {
+            format!("ffmpegが終了コード{status}で失敗しました。")
+        } else {
+            format!("ffmpegの変換に失敗しました: {}", truncate_error(detail))
+        });
+    }
+    Ok(())
+}
+
+// 変換用 ffmpeg を 1 回実行し、ログを UI へ流しながら終了を待つ。
+// 失敗時のエラーメッセージ用に stderr の内容も返す。
+fn run_convert_command(
+    ffmpeg: &Path,
+    input: &Path,
+    output: &Path,
+    use_videotoolbox: bool,
+    tx: &mpsc::Sender<DownloadEvent>,
+    progress: &Arc<ProgressContext>,
+    tracker: &ProcessTracker,
+) -> Result<(std::process::ExitStatus, String), String> {
+    let mut command = default_mp4_command(ffmpeg, input, output, use_videotoolbox);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("ffmpeg起動に失敗しました: {err}"))?;
+    tracker.register(&child);
+
+    spawn_stream_thread(child.stdout.take(), tx, progress);
+    let stderr_thread = spawn_capture_stream_thread(child.stderr.take(), tx, progress);
+
+    let status = child
+        .wait()
+        .map_err(|err| format!("ffmpegの終了待ちに失敗しました: {err}"))?;
+    let stderr = stderr_thread
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    Ok((status, stderr))
+}
+
 // yt-dlp を起動し、標準出力・標準エラーを並列で読み取って UI に流す。
 pub(super) fn run_yt_dlp(
     yt_dlp_path: &Path,
@@ -169,14 +245,27 @@ pub(super) fn run_yt_dlp(
 }
 
 // 子プロセスのストリームを 1 行ずつ分解してログ・進捗イベントに変換する。
+// capture を渡すと、流した行の全文をそこへ蓄積する。
 fn stream_lines<R: Read + Send + 'static>(
     reader: R,
     tx: mpsc::Sender<DownloadEvent>,
     progress: Arc<ProgressContext>,
+    mut capture: Option<&mut String>,
 ) {
     let mut buffered = BufReader::new(reader);
     let mut buf = [0u8; 4096];
     let mut line = Vec::new();
+    let emit = |line: &[u8], capture: &mut Option<&mut String>| {
+        let text = match String::from_utf8(line.to_vec()) {
+            Ok(text) => text,
+            Err(_) => String::from_utf8_lossy(line).to_string(),
+        };
+        if let Some(capture) = capture {
+            capture.push_str(&text);
+            capture.push('\n');
+        }
+        handle_stream_line(text, &tx, &progress);
+    };
     loop {
         let read = match buffered.read(&mut buf) {
             Ok(0) => break,
@@ -186,12 +275,7 @@ fn stream_lines<R: Read + Send + 'static>(
         for &byte in &buf[..read] {
             if byte == b'\n' || byte == b'\r' {
                 if !line.is_empty() {
-                    if let Ok(text) = String::from_utf8(line.clone()) {
-                        handle_stream_line(text, &tx, &progress);
-                    } else {
-                        let text = String::from_utf8_lossy(&line).to_string();
-                        handle_stream_line(text, &tx, &progress);
-                    }
+                    emit(&line, &mut capture);
                     line.clear();
                 }
             } else {
@@ -200,8 +284,7 @@ fn stream_lines<R: Read + Send + 'static>(
         }
     }
     if !line.is_empty() {
-        let text = String::from_utf8_lossy(&line).to_string();
-        handle_stream_line(text, &tx, &progress);
+        emit(&line, &mut capture);
     }
 }
 
@@ -214,8 +297,24 @@ pub(super) fn spawn_stream_thread<R: Read + Send + 'static>(
     if let Some(reader) = reader {
         let tx_clone = tx.clone();
         let progress_clone = progress.clone();
-        thread::spawn(move || stream_lines(reader, tx_clone, progress_clone));
+        thread::spawn(move || stream_lines(reader, tx_clone, progress_clone, None));
     }
+}
+
+// UI ログへ流しつつ全文を蓄積するヘルパー。join すると蓄積した内容を得られる。
+fn spawn_capture_stream_thread<R: Read + Send + 'static>(
+    reader: Option<R>,
+    tx: &mpsc::Sender<DownloadEvent>,
+    progress: &Arc<ProgressContext>,
+) -> Option<thread::JoinHandle<String>> {
+    let reader = reader?;
+    let tx = tx.clone();
+    let progress = progress.clone();
+    Some(thread::spawn(move || {
+        let mut captured = String::new();
+        stream_lines(reader, tx, progress, Some(&mut captured));
+        captured
+    }))
 }
 
 // 1 行ログを進捗解析し、その後 UI ログへ送る。
