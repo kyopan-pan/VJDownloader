@@ -21,8 +21,16 @@ pub fn current_mode() -> Option<InputMode> {
         return None;
     }
 
-    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    let mut process_id = 0_u32;
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
     if thread_id == 0 {
+        return None;
+    }
+
+    // IMM32 は他プロセスのウィンドウへ入力コンテキストを返さないため、
+    // 前面が自プロセス以外のときに判定すると誤った入力状態を報告してしまう。
+    // 自アプリが前面でない間は「変化なし」として扱う。
+    if process_id != std::process::id() {
         return None;
     }
 

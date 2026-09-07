@@ -18,6 +18,8 @@ const BOT_WARNING_TEXT_COLOR: egui::Color32 = egui::Color32::from_rgb(253, 224, 
 // 狭いペインでもファイル名を読み取りやすくする一覧専用の文字設定。
 const FILE_NAME_FONT_SIZE: f32 = 12.0;
 const FILE_NAME_LETTER_SPACING: f32 = -1.0;
+// 字間を詰めると空白まで狭まり単語の切れ目が読み取りにくくなるため、空白だけは逆に広げる。
+const FILE_NAME_SPACE_LETTER_SPACING: f32 = 1.0;
 
 pub fn render(
     // UI全体の状態とアクションの入口
@@ -807,13 +809,76 @@ fn file_name_layout_job(
     font_id: &egui::FontId,
     color: egui::Color32,
 ) -> egui::text::LayoutJob {
-    egui::text::LayoutJob::single_section(
-        text.to_string(),
-        egui::TextFormat {
-            font_id: font_id.clone(),
-            extra_letter_spacing: FILE_NAME_LETTER_SPACING,
-            color,
-            ..Default::default()
-        },
-    )
+    let mut job = egui::text::LayoutJob::default();
+    // 空白の連なりと文字の連なりで字間を変え、詰めた字間でも単語の区切りを残す。
+    for (is_space, run) in whitespace_runs(text) {
+        job.append(
+            run,
+            0.0,
+            egui::TextFormat {
+                font_id: font_id.clone(),
+                extra_letter_spacing: if is_space {
+                    FILE_NAME_SPACE_LETTER_SPACING
+                } else {
+                    FILE_NAME_LETTER_SPACING
+                },
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
+// 文字列を空白の連なりと非空白の連なりへ交互に分割する。
+fn whitespace_runs(text: &str) -> Vec<(bool, &str)> {
+    let mut runs = Vec::new();
+    let mut start = 0usize;
+    let mut current: Option<bool> = None;
+    for (index, ch) in text.char_indices() {
+        let is_space = ch.is_whitespace();
+        if current == Some(is_space) {
+            continue;
+        }
+        if let Some(previous) = current {
+            runs.push((previous, &text[start..index]));
+        }
+        start = index;
+        current = Some(is_space);
+    }
+    if let Some(previous) = current {
+        runs.push((previous, &text[start..]));
+    }
+    runs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::whitespace_runs;
+
+    #[test]
+    fn splits_file_name_into_alternating_space_and_text_runs() {
+        assert_eq!(
+            whitespace_runs("My Video 01.mp4"),
+            vec![
+                (false, "My"),
+                (true, " "),
+                (false, "Video"),
+                (true, " "),
+                (false, "01.mp4"),
+            ]
+        );
+        // 全角スペースと連続スペースもまとめて空白として扱う。
+        assert_eq!(
+            whitespace_runs("日本語　の  動画"),
+            vec![
+                (false, "日本語"),
+                (true, "　"),
+                (false, "の"),
+                (true, "  "),
+                (false, "動画"),
+            ]
+        );
+        assert_eq!(whitespace_runs(""), vec![]);
+    }
 }

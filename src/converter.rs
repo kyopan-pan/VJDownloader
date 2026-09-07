@@ -385,6 +385,16 @@ pub(crate) const LOG_CONVERT_WITH_VIDEOTOOLBOX: &str = "ffmpeg: h264_videotoolbo
 pub(crate) const LOG_RETRY_WITH_LIBX264: &str =
     "ffmpeg: VideoToolboxを利用できないためlibx264で再試行します。";
 
+// 変換に使う H.264 エンコーダ名。h264_videotoolbox は macOS 専用のため、
+// それ以外のプラットフォームでは libx264 を使用する。
+pub(crate) fn h264_encoder() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "h264_videotoolbox"
+    } else {
+        "libx264"
+    }
+}
+
 // 既定フォーマット（H.264 MP4）へ変換する ffmpeg コマンドを組み立てる。
 // 変換ウィンドウとダウンロード後の変換で同じ設定を共有する。
 pub(crate) fn default_mp4_command(

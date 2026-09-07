@@ -7,7 +7,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use crate::converter::{
-    LOG_CONVERT_WITH_VIDEOTOOLBOX, LOG_RETRY_WITH_LIBX264, default_mp4_command, truncate_error,
+    LOG_CONVERT_WITH_VIDEOTOOLBOX, LOG_RETRY_WITH_LIBX264, default_mp4_command, h264_encoder,
+    truncate_error,
 };
 use crate::paths::bin_dir;
 
@@ -51,7 +52,7 @@ fn run_pipe_to_ffmpeg(
         .arg("-i")
         .arg("pipe:0")
         .arg("-c:v")
-        .arg("h264_videotoolbox")
+        .arg(h264_encoder())
         .arg("-b:v")
         .arg("5M")
         .arg("-pix_fmt")
@@ -343,9 +344,17 @@ fn handle_stream_line(
 }
 
 // 保存先などの通知行は除外し、yt-dlp の `[download] xx.x%` 行だけを判定する。
+// ファイル名に `%` を含む通知行を進捗と誤認しないよう、タグ直後の数値だけを見る。
 fn yt_dlp_download_percent(line: &str) -> Option<f32> {
-    line.strip_prefix("[download]")?;
-    extract_percent(line)
+    let rest = line.strip_prefix("[download]")?.trim_start();
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if digits.is_empty() || !rest[digits.len()..].starts_with('%') {
+        return None;
+    }
+    digits.parse::<f32>().ok()
 }
 
 // yt-dlp/ffmpeg ログから進捗パーセンテージや変換フェーズ遷移を検出する。
@@ -432,6 +441,11 @@ mod tests {
         );
         assert_eq!(
             yt_dlp_download_percent("[Merger] Merging formats into 日本語.mp4"),
+            None
+        );
+        // ファイル名に `%` を含む通知行を進捗と誤認しない。
+        assert_eq!(
+            yt_dlp_download_percent("[download] Destination: 100% Orange Juice OP.mp4"),
             None
         );
     }

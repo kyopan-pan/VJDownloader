@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
 use std::{fs::File, io::Read, process::Command};
 
@@ -53,13 +53,25 @@ pub fn yt_dlp_path() -> PathBuf {
 }
 
 pub fn ffmpeg_path() -> PathBuf {
-    static PATH: LazyLock<PathBuf> = LazyLock::new(|| resolve_media_tool_path("ffmpeg"));
-    PATH.clone()
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    cached_media_tool_path(&PATH, "ffmpeg")
 }
 
 pub fn ffprobe_path() -> PathBuf {
-    static PATH: LazyLock<PathBuf> = LazyLock::new(|| resolve_media_tool_path("ffprobe"));
-    PATH.clone()
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    cached_media_tool_path(&PATH, "ffprobe")
+}
+
+// 探索は外部プロセスの起動を伴うため、確定した結果だけを記憶する。
+// 未発見のまま記憶すると、起動後にffmpegを導入しても再起動まで復旧できない。
+fn cached_media_tool_path(cache: &OnceLock<PathBuf>, name: &str) -> PathBuf {
+    if let Some(path) = cache.get() {
+        return path.clone();
+    }
+    match resolve_media_tool_path(name) {
+        Some(path) => cache.get_or_init(|| path).clone(),
+        None => bin_dir().join(executable_name(name)),
+    }
 }
 
 pub fn deno_path() -> PathBuf {
@@ -70,7 +82,8 @@ pub fn executable_name(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
-fn resolve_media_tool_path(name: &str) -> PathBuf {
+// 使用できると確認できた場合のみ Some を返す。見つからない場合は呼び出し側で既定パスへ倒す。
+fn resolve_media_tool_path(name: &str) -> Option<PathBuf> {
     let file_name = executable_name(name);
     let private = bin_dir().join(&file_name);
 
@@ -78,7 +91,7 @@ fn resolve_media_tool_path(name: &str) -> PathBuf {
     {
         // 誤って配置されたmacOS/LinuxバイナリをWindowsで起動しない。
         if is_usable_windows_media_tool(&private) {
-            return private;
+            return Some(private);
         }
 
         if let Some(path_env) = std::env::var_os("PATH") {
@@ -86,17 +99,15 @@ fn resolve_media_tool_path(name: &str) -> PathBuf {
                 .map(|dir| dir.join(&file_name))
                 .find(|path| is_usable_windows_media_tool(path))
             {
-                return path;
+                return Some(path);
             }
         }
+
+        None
     }
 
     #[cfg(not(target_os = "windows"))]
-    if private.exists() {
-        return private;
-    }
-
-    private
+    private.exists().then_some(private)
 }
 
 #[cfg(target_os = "windows")]

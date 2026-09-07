@@ -7,6 +7,7 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::converter::h264_encoder;
 use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{bin_dir, deno_path, executable_name, yt_dlp_path};
 
@@ -443,7 +444,10 @@ pub(super) fn fallback_yt_dlp_args(
     args.push("--recode-video".to_string());
     args.push("mp4".to_string());
     args.push("--postprocessor-args".to_string());
-    args.push("VideoConvertor:-c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p".to_string());
+    args.push(format!(
+        "VideoConvertor:-c:v {} -b:v 5M -pix_fmt yuv420p",
+        h264_encoder()
+    ));
     append_runtime_args(&mut args, ffmpeg_path, js_runtime);
     Some(args)
 }

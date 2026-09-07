@@ -73,6 +73,8 @@
 - yt-dlpをダウンロードした後、実行権限を付与する。
 - macOSではffmpeg/ffprobeを同梱バイナリから`~/.vjdownloader/bin`へコピーし、実行権限を付与する。
 - WindowsではmacOS用の同梱ffmpeg/ffprobeを配置しない。`ffmpeg.exe`/`ffprobe.exe`はアプリ用binフォルダ、PATHの順に探索し、Windows PE形式かつ`-version`を正常実行できるものだけを使用する。
+- ffmpeg/ffprobeの探索結果は、使用可能と確定した場合のみ記憶する。見つからなかった場合は記憶せず次回も探索し直し、
+  アプリ起動後にffmpegを導入した場合も再起動せずに復旧できるようにする。
 - denoが存在しない場合はGitHubの最新リリースから`deno-aarch64-apple-darwin.zip`をダウンロードし展開する。
 - yt-dlp/denoの取得と更新は「一時フォルダへダウンロード → 内容を検証 → 本体を置き換え → 前バージョンを削除」の順で行い、
   ダウンロード中も既存バイナリを残す。
@@ -84,6 +86,7 @@
 - yt-dlp実行時に`~/.vjdownloader/bin`をPATH先頭に追加する。
 - yt-dlpのstdout/stderrはUTF-8で行単位に読み取り、ログと進捗に反映する。
 - yt-dlpの生の進捗行はそのまま大量に表示せず、5%刻みの`ダウンロード進捗: n%`へ集約する。
+  集約対象は`[download]`タグの直後が数値と`%`である行に限り、ファイル名に`%`を含む通知行はそのままログへ出力する。
 - ダウンロード中にStopを押した場合は実行中のプロセスを終了してキャンセルする。
 
 ## 動画ファイルのMP4変換
@@ -135,7 +138,7 @@
 
 - `-f bv*[height<=N]+ba/b[height<=N]`を指定する。Nは`標準`で720、`1080p上限`で1080。
 - `--recode-video mp4`を指定する。
-- `--postprocessor-args VideoConvertor:-c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p`を指定する。
+- `--postprocessor-args VideoConvertor:-c:v <H.264エンコーダ> -b:v 5M -pix_fmt yuv420p`を指定する。
 
 ## ダウンロードオプション（最高画質 + 変換）
 
@@ -164,13 +167,14 @@
 - 直リンク経路のダウンロード進捗は、同じGETレスポンスの`Content-Length`と転送量から算出し、受信中に`n%`を表示する。
   `Content-Length`がない場合は受信済みMBを表示する。
 - ダウンロード進捗は進捗バーだけでなくログにも`ダウンロード進捗: n%`として出力する。
-- ffmpeg変換は`h264_videotoolbox`を必須とし、利用できない場合は処理を中断する。
+- ffmpeg変換はH.264エンコーダを必須とし、ffmpegの`-encoders`に存在しない場合は処理を中断する。
+  macOSではさらにApple Silicon（aarch64）であることを必須とする。
 - ffmpeg変換ログは整形せずデフォルト出力をそのままステータスログへ出力する。
 - 直リンク取得に失敗した場合、または直リンク経路の`curl`/`ffmpeg`処理が失敗した場合は
   `yt-dlp --no-playlist --encoding utf-8 --newline --progress-delta 1 --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`
   の出力をffmpegへパイプする。
 - ffmpegは
-  `-stats -analyzeduration 100M -probesize 100M -c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`
+  `-stats -analyzeduration 100M -probesize 100M -c:v <H.264エンコーダ> -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`
   を基本とし、直リンク経路・yt-dlpフォールバック経路ともに`-f webm -i pipe:0`を使用する。
 
 ## ストリーム再生
@@ -289,6 +293,7 @@
 - 行右端の×印ボタンで削除できる。×印はフォントに依存しない線画として表示する。
 - ファイル名は左寄せで表示する。
 - ファイル名は12pt、字間-1ptで表示し、狭いウィンドウでも表示文字数を確保する。
+- ただし空白（半角・全角・連続を含む）の字間は+1ptとし、字間を詰めても単語の区切りが読み取れるようにする。
 - ファイル名の上下パディングは等間隔に揃える。
 - ファイル名が長い場合は末尾を`...`で省略する。
 
@@ -436,6 +441,11 @@
 ## プラットフォーム依存実装の分離
 
 - Syphon出力はmacOSかつ`syphon`フィーチャー有効時のみ組み込み、Windowsでは通常のプレビュー処理を使用する。
+- 変換に使うH.264エンコーダはプラットフォームで切り替える。macOSは`h264_videotoolbox`、Windowsは`libx264`を使用する。
+  ダウンロード後の変換・yt-dlpの`VideoConvertor`・パイプ変換・AnimeThemes変換のすべてでこの選択結果を共有する。
+- Windowsの入力ソース判定は、前面ウィンドウが自プロセスの場合のみ行う。IMM32は他プロセスのウィンドウへ入力コンテキストを
+  返さないため、他アプリが前面の間は「変化なし」として扱い、フォーカス切り替えでログを出さない。
+- リリースビルドはWindowsサブシステムとしてビルドし、GUIの横にコンソールウィンドウを出さない。デバッグビルドはコンソールを残す。
 - 実行権限ビットの検査・付与はUnix環境のみで行う。Windowsでは通常ファイルの存在を確認し、外部ツールの起動可否は既存の実行時検証で確認する。
 - 対応プラットフォームはmacOSとWindowsの2つとし、それ以外のターゲットは`compile_error!`でビルドを止める。
 - OS固有APIの呼び出しは`src/platform/`配下にのみ置き、それ以外のモジュール（`download/`、`stream/`、`search_index/`、`ui`など）はプラットフォーム差分を持たない。

@@ -1,3 +1,7 @@
+// リリースビルドではコンソールウィンドウを出さない。
+// デバッグビルドでは println!/eprintln! の出力を見るためコンソールを残す。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod bundled;
 mod converter;
