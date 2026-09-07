@@ -73,6 +73,7 @@
 - yt-dlpをダウンロードした後、実行権限を付与する。
 - macOSではffmpeg/ffprobeを同梱バイナリから`~/.vjdownloader/bin`へコピーし、実行権限を付与する。
 - WindowsではmacOS用の同梱ffmpeg/ffprobeを配置しない。`ffmpeg.exe`/`ffprobe.exe`はアプリ用binフォルダ、PATHの順に探索し、Windows PE形式かつ`-version`を正常実行できるものだけを使用する。
+- Windowsで使用可能な`ffmpeg.exe`/`ffprobe.exe`が見つからない場合は、初回セットアップで公式ビルドを取得する。
 - ffmpeg/ffprobeの探索結果は、使用可能と確定した場合のみ記憶する。見つからなかった場合は記憶せず次回も探索し直し、
   アプリ起動後にffmpegを導入した場合も再起動せずに復旧できるようにする。
 - denoが存在しない場合はGitHubの最新リリースから`deno-aarch64-apple-darwin.zip`をダウンロードし展開する。
@@ -355,6 +356,16 @@
 - yt-dlpとDenoはWindowsの対象CPU（x64/ARM64）向け公式バイナリを取得し、`.exe`名で検証・保存・検出する。
 - DenoのZIPはWindows PowerShellから呼び出す.NETの`ZipFile::ExtractToDirectory`で展開する。パスは環境変数で渡し、空白・日本語・記号を含むパスを保護する。
 - macOSの取得先と展開方式は維持する。
+- ffmpeg/ffprobeはBtbN/FFmpeg-Buildsの静的ビルドZIP（`latest`タグ）を対象CPU別に取得する。
+  x64は`ffmpeg-master-latest-win64-gpl.zip`、ARM64は`ffmpeg-master-latest-winarm64-gpl.zip`を使用する。
+- ZIPには`ffmpeg.exe`と`ffprobe.exe`の両方が含まれるため、ダウンロードは1回にまとめる。
+  実行ファイルは`<展開名>/bin/`配下に置かれるため、展開先を再帰的に探索して取り出す。
+- 配置先はアプリ用binフォルダに固定し、PATH上のffmpegは書き換えない。
+- 取得手順はyt-dlp/denoと同じく「一時フォルダへダウンロード → 内容を検証 → 本体を置き換え → 前バージョンを削除」とする。
+  片方だけが新しい状態にならないよう、ffmpegとffprobeの両方の検証が終わってから置き換える。
+- 取得はUIを止めないよう、起動時のバックグラウンド処理で行う。ダウンロード開始時に未導入だった場合はその時点でも取得を試み、
+  進捗をステータスログへ出力する。起動時取得とダウンロード開始時取得は排他制御し、二重取得を防ぐ。
+- 起動時の取得に失敗した場合はステータスログへ理由を出力する。
 
 ## テーマとフォント
 

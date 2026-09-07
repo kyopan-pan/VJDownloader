@@ -4,9 +4,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 #[cfg(not(target_os = "windows"))]
 use std::path::Path;
-#[cfg(target_os = "windows")]
-use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use crate::paths::media_tools_ready;
+#[cfg(not(target_os = "windows"))]
 use crate::paths::{ffmpeg_path, ffprobe_path};
 
 #[cfg(not(target_os = "windows"))]
@@ -23,25 +24,15 @@ pub fn ensure_bundled_tools() -> Result<(), String> {
     Ok(())
 }
 
+// Windowsはffmpeg/ffprobeを同梱せず初回セットアップで取得するため、ここでは状態確認だけを行う。
+// 取得自体はUIを止めないよう、起動時のバックグラウンド処理とダウンロード開始時に実施する。
 #[cfg(target_os = "windows")]
 pub fn ensure_bundled_tools() -> Result<(), String> {
-    ensure_windows_media_tool("ffmpeg", &ffmpeg_path())?;
-    ensure_windows_media_tool("ffprobe", &ffprobe_path())
-}
-
-#[cfg(target_os = "windows")]
-fn ensure_windows_media_tool(label: &str, path: &std::path::Path) -> Result<(), String> {
-    let output = Command::new(path)
-        .arg("-version")
-        .output()
-        .map_err(|err| format!("Windows用{label}.exeを起動できません: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Windows用{label}.exeの起動確認に失敗しました: {}",
-            output.status
-        ));
+    if media_tools_ready() {
+        Ok(())
+    } else {
+        Err("ffmpeg/ffprobeが見つかりません。セットアップの完了を待つか、設定から再実行してください。".to_string())
     }
-    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]

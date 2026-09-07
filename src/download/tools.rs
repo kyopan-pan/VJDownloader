@@ -15,6 +15,14 @@ use super::{DownloadEvent, DownloadMode};
 
 // 途中で切れたダウンロードを壊れたバイナリとして扱うための下限サイズ。
 const MIN_TOOL_BYTES: u64 = 1024 * 1024;
+// Windows向けffmpeg/ffprobeの公式ビルド配布元。1つのZIPに両方が含まれる静的ビルドを使う。
+#[cfg(target_os = "windows")]
+const FFMPEG_WINDOWS_X64_URL: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+#[cfg(target_os = "windows")]
+const FFMPEG_WINDOWS_ARM64_URL: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-winarm64-gpl.zip";
+// 起動直後の取得とダウンロード開始時の取得が重なって二重にDLしないよう直列化する。
+#[cfg(target_os = "windows")]
+static FFMPEG_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // 一時作業フォルダの名前に付ける共通プレフィックス。
 const STAGING_PREFIX: &str = ".tool-staging-";
 // 置き換え時に旧バージョンを一時退避させる名前のサフィックス。
@@ -62,6 +70,97 @@ pub fn ensure_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
         log_event(tx, "denoが見つかりません。ダウンロードします。");
     }
     install_deno(tx)
+}
+
+// Windowsはffmpeg/ffprobeを同梱しないため、未導入の場合のみ公式ビルドを取得する。
+// 使用可能なものがbinフォルダかPATH上にあれば何もしない。
+#[cfg(target_os = "windows")]
+pub fn ensure_ffmpeg_tools(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<(), String> {
+    // ロックが毒されていても取得自体は再試行できるため、中身をそのまま使う。
+    let _guard = FFMPEG_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if crate::paths::media_tools_ready() {
+        return Ok(());
+    }
+
+    log_event(tx, "ffmpeg/ffprobeが見つかりません。ダウンロードします。");
+    install_ffmpeg_tools(tx)?;
+
+    if !crate::paths::media_tools_ready() {
+        return Err("ffmpeg/ffprobeを配置しましたが、実行確認に失敗しました。".to_string());
+    }
+    log_event(tx, "ffmpeg/ffprobeをダウンロードしました。");
+    Ok(())
+}
+
+// 公式ビルドのZIPを一時フォルダへ取得し、ffmpegとffprobeをまとめて配置する。
+#[cfg(target_os = "windows")]
+fn install_ffmpeg_tools(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<(), String> {
+    let url = if cfg!(target_arch = "aarch64") {
+        FFMPEG_WINDOWS_ARM64_URL
+    } else {
+        FFMPEG_WINDOWS_X64_URL
+    };
+
+    // PATH上のffmpegを書き換えないよう、配置先はアプリ用binフォルダに固定する。
+    let work_dir = bin_dir();
+    ensure_dir(&work_dir)?;
+    cleanup_stale_staging_dirs(&work_dir);
+
+    let staging = create_tool_staging_dir(&work_dir, "ffmpeg")?;
+    let result = fetch_and_place_ffmpeg(url, &staging, &work_dir, tx);
+    let _ = fs::remove_dir_all(&staging);
+    result
+}
+
+// ZIPの取得・展開・検証を終えてから、ffmpegとffprobeを本体へ入れ替える。
+#[cfg(target_os = "windows")]
+fn fetch_and_place_ffmpeg(
+    url: &str,
+    staging: &Path,
+    install_dir: &Path,
+    tx: Option<&mpsc::Sender<DownloadEvent>>,
+) -> Result<(), String> {
+    let zip_path = staging.join("ffmpeg.zip");
+    curl_download(url, &zip_path, "ffmpeg")?;
+    extract_tool_zip(&zip_path, staging)?;
+    let _ = fs::remove_file(&zip_path);
+
+    log_event(tx, "ffmpeg/ffprobeのダウンロード内容を確認します。");
+
+    let mut staged = Vec::new();
+    for label in ["ffmpeg", "ffprobe"] {
+        let file_name = executable_name(label);
+        let found = find_extracted_file(staging, &file_name)
+            .ok_or_else(|| format!("展開後の{file_name}が見つかりません。"))?;
+        verify_staged_tool(&found, label)?;
+        staged.push((found, install_dir.join(&file_name), label));
+    }
+
+    // 片方だけ入れ替わった状態にしないよう、両方の検証が終わってから配置する。
+    for (found, target, label) in staged {
+        replace_tool(&found, &target, label)?;
+        remove_previous_versions(&target);
+    }
+    Ok(())
+}
+
+// 公式ZIPは`<展開名>/bin/`配下に実行ファイルを置くため、展開先を再帰的に探索する。
+#[cfg(target_os = "windows")]
+fn find_extracted_file(root: &Path, file_name: &str) -> Option<PathBuf> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry.file_type().is_file()
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(file_name)
+        })
+        .map(|entry| entry.path().to_path_buf())
 }
 
 // 取得と検証が完了してから既存バイナリを置き換える。失敗時は旧バージョンを残す。

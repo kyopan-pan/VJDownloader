@@ -19,6 +19,9 @@ use crate::paths::{ffmpeg_path, yt_dlp_path};
 
 pub use guard::{BotGuardState, GuardNotice, is_youtube_url};
 pub use tools::{ensure_deno, ensure_yt_dlp, js_runtime_arg, update_deno, update_yt_dlp};
+// Windowsはffmpeg/ffprobeを同梱しないため、取得処理を外部へ公開する。
+#[cfg(target_os = "windows")]
+pub use tools::ensure_ffmpeg_tools;
 
 pub enum DownloadEvent {
     Log(String),
@@ -402,6 +405,9 @@ fn run_download_inner(
     }
 
     // 必須ツールの存在確認を先に行う。
+    // Windowsは起動時のバックグラウンド取得が終わっていない場合があるため、ここでも取得を試みる。
+    #[cfg(target_os = "windows")]
+    tools::ensure_ffmpeg_tools(Some(tx))?;
     ensure_bundled_tools()?;
     let ffmpeg = ffmpeg_path();
     if !ffmpeg.exists() {

@@ -74,6 +74,13 @@ fn cached_media_tool_path(cache: &OnceLock<PathBuf>, name: &str) -> PathBuf {
     }
 }
 
+// ffmpegとffprobeの両方が使用可能かを返す。探索結果を記憶しないため、
+// アプリ起動後に導入した場合でも最新の状態を判定できる。
+#[cfg(target_os = "windows")]
+pub fn media_tools_ready() -> bool {
+    resolve_media_tool_path("ffmpeg").is_some() && resolve_media_tool_path("ffprobe").is_some()
+}
+
 pub fn deno_path() -> PathBuf {
     resolve_tool_path(&executable_name("deno"))
 }

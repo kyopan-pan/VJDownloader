@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "windows"))]
 use crate::bundled::ensure_bundled_tools;
 use crate::converter::{ConversionEvent, ConverterUiHandle, render_converter_viewport};
 use crate::download::{
@@ -129,7 +130,11 @@ impl DownloaderApp {
             .search_panel_width
             .parse::<f32>()
             .unwrap_or(window_width * 0.5);
+        // Windowsのffmpeg/ffprobeは起動時のバックグラウンド取得に任せるため、ここでは確認しない。
+        #[cfg(not(target_os = "windows"))]
         let bundled_tools_error = ensure_bundled_tools().err();
+        #[cfg(target_os = "windows")]
+        let bundled_tools_error: Option<String> = None;
         let search_engine = SearchEngine::new(search_index_db_path()).ok();
         let index_event_rx = search_engine
             .as_ref()
@@ -209,9 +214,18 @@ impl DownloaderApp {
             app.push_status(format!("同梱ツールの配置に失敗しました: {err}"));
         }
 
-        thread::spawn(|| {
+        // Windowsではffmpeg/ffprobeも取得対象になるため、状態ログへ結果を残せるようにする。
+        #[cfg(target_os = "windows")]
+        let status_logs = app.status_logs.clone();
+        thread::spawn(move || {
             let _ = ensure_yt_dlp(None);
             let _ = ensure_deno(None);
+            #[cfg(target_os = "windows")]
+            if let Err(err) = crate::download::ensure_ffmpeg_tools(None) {
+                if let Ok(mut logs) = status_logs.lock() {
+                    logs.push(format!("ffmpeg/ffprobeのセットアップに失敗しました: {err}"));
+                }
+            }
         });
 
         if app.search_engine.is_none() {
