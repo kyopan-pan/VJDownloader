@@ -1,5 +1,5 @@
 use eframe::egui;
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
@@ -18,9 +18,9 @@ use crate::theme::paint_viewport_background;
 
 // ジッタ吸収用フレームバッファの上限（暴走時の安全弁）。
 // 高解像度(Syphon)時は1フレームが大きいためメモリを抑える。
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 const MAX_FRAME_BUFFER: usize = 12;
-#[cfg(not(feature = "syphon"))]
+#[cfg(not(all(target_os = "macos", feature = "syphon")))]
 const MAX_FRAME_BUFFER: usize = 120;
 // ワーカースレッドと UI 間には数フレームだけ滞留させ、描画停止時は新しいフレームを捨てる。
 const FRAME_CHANNEL_CAPACITY: usize = 3;
@@ -51,7 +51,7 @@ struct StreamDeck {
     frame_tx: mpsc::SyncSender<StreamFrame>,
     frame_rx: mpsc::Receiver<StreamFrame>,
     // マスター合成（Syphon配信）用に直近の提示フレームを保持する。
-    #[cfg(feature = "syphon")]
+    #[cfg(all(target_os = "macos", feature = "syphon"))]
     last_rgba: Option<Vec<u8>>,
 }
 
@@ -84,7 +84,7 @@ impl StreamDeck {
             rx,
             frame_tx,
             frame_rx,
-            #[cfg(feature = "syphon")]
+            #[cfg(all(target_os = "macos", feature = "syphon"))]
             last_rgba: None,
         }
     }
@@ -240,7 +240,7 @@ impl StreamDeck {
         self.media_urls.clear();
         self.cache_dir = None;
         self.drain_frames();
-        #[cfg(feature = "syphon")]
+        #[cfg(all(target_os = "macos", feature = "syphon"))]
         {
             self.last_rgba = None;
         }
@@ -451,7 +451,7 @@ impl StreamDeck {
             }
         }
         // マスター合成用に直近フレームを保持（ColorImage は上でコピー済みなので move 可）。
-        #[cfg(feature = "syphon")]
+        #[cfg(all(target_os = "macos", feature = "syphon"))]
         {
             self.last_rgba = Some(frame.rgba);
         }
@@ -464,11 +464,11 @@ pub struct StreamUiState {
     deck_b: StreamDeck,
     // マスタークロスフェード。0.0 = A のみ、1.0 = B のみ。
     fader: f32,
-    #[cfg(feature = "syphon")]
+    #[cfg(all(target_os = "macos", feature = "syphon"))]
     syphon_buffer: Vec<u8>,
 }
 
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 #[derive(Default)]
 struct SyphonUiState {
     publisher: Option<crate::stream::syphon::SyphonPublisher>,
@@ -477,7 +477,7 @@ struct SyphonUiState {
 
 // Metal/Objective-C オブジェクトは Send ではないため、Deferred callback が実行される
 // UI スレッドに固定して保持する。共有 Mutex の中へ入れないことで安全な Send 境界を保つ。
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 thread_local! {
     static SYPHON_UI: RefCell<SyphonUiState> = RefCell::new(SyphonUiState::default());
 }
@@ -489,13 +489,13 @@ impl StreamUiState {
             deck_a: StreamDeck::new("A", "stream_preview_a"),
             deck_b: StreamDeck::new("B", "stream_preview_b"),
             fader: 0.0,
-            #[cfg(feature = "syphon")]
+            #[cfg(all(target_os = "macos", feature = "syphon"))]
             syphon_buffer: vec![0; PREVIEW_WIDTH * PREVIEW_HEIGHT * 4],
         }
     }
 
     // マスター（A*(1-f)+B*f）を BGRA8 でCPU合成する。Syphon配信用。
-    #[cfg(feature = "syphon")]
+    #[cfg(all(target_os = "macos", feature = "syphon"))]
     fn update_master_bgra(&mut self) {
         let w = PREVIEW_WIDTH;
         let h = PREVIEW_HEIGHT;
@@ -527,7 +527,7 @@ impl StreamUiState {
     pub(crate) fn stop_all(&mut self) {
         self.deck_a.stop();
         self.deck_b.stop();
-        #[cfg(feature = "syphon")]
+        #[cfg(all(target_os = "macos", feature = "syphon"))]
         SYPHON_UI.with(|state| *state.borrow_mut() = SyphonUiState::default());
     }
 
@@ -626,7 +626,7 @@ fn render_stream_contents(
             );
 
             // Syphon の状態表示とマスター配信（フィーチャー有効時のみ）。
-            #[cfg(feature = "syphon")]
+            #[cfg(all(target_os = "macos", feature = "syphon"))]
             {
                 render_syphon_status(ui);
                 publish_master(stream, ctx);
@@ -639,7 +639,7 @@ fn render_stream_contents(
 }
 
 // last_rgba から RGB を取り出す（範囲外/未保持は黒）。
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 fn rgb_at(buf: Option<&[u8]>, p: usize) -> (u8, u8, u8) {
     match buf {
         Some(b) if p + 2 < b.len() => (b[p], b[p + 1], b[p + 2]),
@@ -648,7 +648,7 @@ fn rgb_at(buf: Option<&[u8]>, p: usize) -> (u8, u8, u8) {
 }
 
 // 常時有効な Syphon 出力の状態表示。
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 fn render_syphon_status(ui: &mut egui::Ui) {
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {
@@ -681,7 +681,7 @@ fn render_syphon_status(ui: &mut egui::Ui) {
 }
 
 // マスターを Syphon サーバへ1フレーム配信する。
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 fn publish_master(stream: &mut StreamUiState, ctx: &egui::Context) {
     stream.update_master_bgra();
     SYPHON_UI.with(|state| {

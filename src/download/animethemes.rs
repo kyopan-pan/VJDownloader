@@ -110,6 +110,11 @@ fn run_animethemes_yt_dlp_fallback(
 ) -> Result<(), String> {
     let mut cmd = Command::new(yt_dlp);
     cmd.arg("--no-playlist")
+        .arg("--encoding")
+        .arg("utf-8")
+        .arg("--newline")
+        .arg("--progress-delta")
+        .arg("1")
         .arg("--concurrent-fragments")
         .arg("4")
         .arg("-f")

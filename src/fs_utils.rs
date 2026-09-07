@@ -1,4 +1,5 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -48,6 +49,18 @@ pub fn delete_download_file(path: &Path) -> Result<(), String> {
 
 pub fn is_executable(path: &Path) -> bool {
     fs::metadata(path)
-        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .map(|meta| {
+            if !meta.is_file() {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                meta.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        })
         .unwrap_or(false)
 }

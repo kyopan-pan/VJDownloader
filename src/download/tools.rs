@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fs_utils::{ensure_dir, is_executable};
-use crate::paths::{bin_dir, deno_path, yt_dlp_path};
+use crate::paths::{bin_dir, deno_path, executable_name, yt_dlp_path};
 
 use super::{DownloadEvent, DownloadMode};
 
@@ -77,8 +78,15 @@ pub fn update_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
 // yt-dlp を一時フォルダへ取得し、検証後に本体へ入れ替える。
 fn install_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
     let installed = install_tool_staged(&yt_dlp_path(), "yt-dlp", tx, |staging| {
+        #[cfg(not(target_os = "windows"))]
         let url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
-        let staged = staging.join("yt-dlp");
+        #[cfg(target_os = "windows")]
+        let url = if cfg!(target_arch = "aarch64") {
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_arm64.exe"
+        } else {
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+        };
+        let staged = staging.join(executable_name("yt-dlp"));
         curl_download(url, &staged, "yt-dlp")?;
         Ok(staged)
     })?;
@@ -90,23 +98,21 @@ fn install_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, S
 // deno を一時フォルダへ取得・展開し、検証後に本体へ入れ替える。
 fn install_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
     let installed = install_tool_staged(&deno_path(), "deno", tx, |staging| {
+        #[cfg(not(target_os = "windows"))]
         let url = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip";
+        #[cfg(target_os = "windows")]
+        let url = if cfg!(target_arch = "aarch64") {
+            "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-pc-windows-msvc.zip"
+        } else {
+            "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
+        };
         let zip_path = staging.join("deno.zip");
         curl_download(url, &zip_path, "deno")?;
 
-        let status = Command::new("unzip")
-            .arg("-o")
-            .arg(zip_path.to_string_lossy().to_string())
-            .arg("-d")
-            .arg(staging.to_string_lossy().to_string())
-            .status()
-            .map_err(|err| format!("unzip起動に失敗しました: {err}"))?;
+        extract_tool_zip(&zip_path, staging)?;
         let _ = fs::remove_file(&zip_path);
-        if !status.success() {
-            return Err(format!("denoの展開に失敗しました: {status}"));
-        }
 
-        let staged = staging.join("deno");
+        let staged = staging.join(executable_name("deno"));
         if !staged.exists() {
             return Err("展開後のdenoが見つかりません。".to_string());
         }
@@ -347,7 +353,14 @@ pub fn js_runtime_arg() -> String {
 
 // ダウンロード仕様に関わらず共通で渡す引数セットを組み立てる。
 fn common_yt_dlp_args(cookie_args: &[String]) -> Vec<String> {
-    let mut args = vec!["--no-playlist".to_string()];
+    let mut args = vec![
+        "--no-playlist".to_string(),
+        "--encoding".to_string(),
+        "utf-8".to_string(),
+        "--newline".to_string(),
+        "--progress-delta".to_string(),
+        "1".to_string(),
+    ];
     args.extend(cookie_args.iter().cloned());
     args.extend(vec![
         "--extractor-args".to_string(),
@@ -446,14 +459,14 @@ fn detect_deno_binary() -> Option<PathBuf> {
     candidates.push(deno_path());
 
     if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join(".deno").join("bin").join("deno"));
+        candidates.push(home.join(".deno").join("bin").join(executable_name("deno")));
     }
     candidates.push(PathBuf::from("/opt/homebrew/bin/deno"));
     candidates.push(PathBuf::from("/usr/local/bin/deno"));
 
     if let Some(path_env) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_env) {
-            candidates.push(dir.join("deno"));
+            candidates.push(dir.join(executable_name("deno")));
         }
     }
 
@@ -464,11 +477,17 @@ fn detect_deno_binary() -> Option<PathBuf> {
 
 fn ensure_executable(path: &Path) -> Result<(), String> {
     let metadata = fs::metadata(path).map_err(|err| err.to_string())?;
-    let mut perms = metadata.permissions();
-    let mode = perms.mode();
-    if mode & 0o111 != 0o111 {
-        perms.set_mode(mode | 0o111);
-        fs::set_permissions(path, perms).map_err(|err| err.to_string())?;
+    if !metadata.is_file() {
+        return Err(format!("実行ファイルではありません: {}", path.display()));
+    }
+    #[cfg(unix)]
+    {
+        let mut perms = metadata.permissions();
+        let mode = perms.mode();
+        if mode & 0o111 != 0o111 {
+            perms.set_mode(mode | 0o111);
+            fs::set_permissions(path, perms).map_err(|err| err.to_string())?;
+        }
     }
     Ok(())
 }
@@ -505,8 +524,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        MIN_TOOL_BYTES, install_tool_staged, is_usable_tool, previous_version_paths, replace_tool,
-        restore_interrupted_update, verify_staged_tool,
+        MIN_TOOL_BYTES, common_yt_dlp_args, install_tool_staged, is_usable_tool,
+        previous_version_paths, replace_tool, restore_interrupted_update, verify_staged_tool,
     };
 
     // --version に応答し、サイズ下限も満たすダミーバイナリを作る。
@@ -583,5 +602,75 @@ mod tests {
         assert!(!restore_interrupted_update(&target));
         assert!(!target.exists());
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn yt_dlp_output_is_utf8_and_progress_is_throttled() {
+        let args = common_yt_dlp_args(&[]);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--encoding" && pair[1] == "utf-8")
+        );
+        assert!(args.iter().any(|arg| arg == "--newline"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--progress-delta" && pair[1] == "1")
+        );
+    }
+}
+
+fn extract_tool_zip(zip_path: &Path, destination: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let output = Command::new("powershell.exe")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:VJDL_ZIP_PATH, $env:VJDL_ZIP_DEST)"])
+        .env("VJDL_ZIP_PATH", zip_path)
+        .env("VJDL_ZIP_DEST", destination)
+        .output();
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("unzip")
+        .arg("-o")
+        .arg(zip_path)
+        .arg("-d")
+        .arg(destination)
+        .output();
+    let output = output.map_err(|err| format!("ZIP展開処理の起動に失敗しました: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ZIPの展開に失敗しました: {} {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_setup_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_zip_in_path_with_spaces_and_metacharacters() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("setup space [test] ' 日本語");
+        fs::create_dir(&dir).unwrap();
+        let source = dir.join("deno.exe");
+        fs::write(&source, b"zip extraction fixture").unwrap();
+        let zip = temp.path().join("test.zip");
+        let status = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:VJDL_TEST_SOURCE, $env:VJDL_TEST_ZIP)"])
+            .env("VJDL_TEST_SOURCE", &dir).env("VJDL_TEST_ZIP", &zip)
+            .status().unwrap();
+        assert!(status.success());
+        let dest = dir.join("output");
+        extract_tool_zip(&zip, &dest).unwrap();
+        assert_eq!(
+            fs::read(dest.join("deno.exe")).unwrap(),
+            b"zip extraction fixture"
+        );
+        assert!(yt_dlp_path().ends_with("yt-dlp.exe"));
+        assert!(deno_path().ends_with("deno.exe"));
     }
 }

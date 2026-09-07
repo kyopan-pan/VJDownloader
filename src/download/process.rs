@@ -317,7 +317,7 @@ fn spawn_capture_stream_thread<R: Read + Send + 'static>(
     }))
 }
 
-// 1 行ログを進捗解析し、その後 UI ログへ送る。
+// 1 行ログを進捗解析し、yt-dlp の生進捗だけを簡潔なログへ集約して UI へ送る。
 fn handle_stream_line(
     line: String,
     tx: &mpsc::Sender<DownloadEvent>,
@@ -328,10 +328,24 @@ fn handle_stream_line(
         return;
     }
 
+    let download_percent = yt_dlp_download_percent(trimmed);
     handle_progress_line(trimmed, progress, tx);
     guard::notify(trimmed, tx);
 
+    if let Some(percent) = download_percent {
+        if let Some(percent) = progress.next_log_percent(percent) {
+            let _ = tx.send(DownloadEvent::Log(format!("ダウンロード進捗: {percent}%")));
+        }
+        return;
+    }
+
     let _ = tx.send(DownloadEvent::Log(trimmed.to_string()));
+}
+
+// 保存先などの通知行は除外し、yt-dlp の `[download] xx.x%` 行だけを判定する。
+fn yt_dlp_download_percent(line: &str) -> Option<f32> {
+    line.strip_prefix("[download]")?;
+    extract_percent(line)
 }
 
 // yt-dlp/ffmpeg ログから進捗パーセンテージや変換フェーズ遷移を検出する。
@@ -400,4 +414,25 @@ fn is_post_processing_line(line: &str) -> bool {
         || lower.contains("[fixup")
         || lower.contains("merging formats into")
         || lower.contains("post-process")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::yt_dlp_download_percent;
+
+    #[test]
+    fn recognizes_only_yt_dlp_percentage_progress_lines() {
+        assert_eq!(
+            yt_dlp_download_percent("[download]  34.5% of 85.87MiB"),
+            Some(34.5)
+        );
+        assert_eq!(
+            yt_dlp_download_percent("[download] Destination: 日本語.mp4"),
+            None
+        );
+        assert_eq!(
+            yt_dlp_download_percent("[Merger] Merging formats into 日本語.mp4"),
+            None
+        );
+    }
 }

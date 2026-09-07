@@ -35,6 +35,8 @@ pub mod input_source {
 }
 
 pub mod menu {
+    #[cfg(target_os = "windows")]
+    pub use super::imp::menu::render_context_menu;
     pub use super::imp::menu::{
         install_settings_menu, take_open_converter_request, take_open_logs_request,
         take_open_settings_request, take_open_speed_test_request, take_open_stream_request,

@@ -1,0 +1,6 @@
+# テキストファイルはLFに統一
+* text=auto eol=lf
+
+# Windows用スクリプトはCRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

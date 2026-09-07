@@ -71,7 +71,8 @@
 - ダウンロードは別スレッドで実行する。
 - 起動時にバックグラウンドでyt-dlp/denoの有無を確認し、未導入ならGitHubの最新リリースから取得する。
 - yt-dlpをダウンロードした後、実行権限を付与する。
-- ffmpeg/ffprobeは同梱バイナリから`~/.vjdownloader/bin`へコピーし、実行権限を付与する。
+- macOSではffmpeg/ffprobeを同梱バイナリから`~/.vjdownloader/bin`へコピーし、実行権限を付与する。
+- WindowsではmacOS用の同梱ffmpeg/ffprobeを配置しない。`ffmpeg.exe`/`ffprobe.exe`はアプリ用binフォルダ、PATHの順に探索し、Windows PE形式かつ`-version`を正常実行できるものだけを使用する。
 - denoが存在しない場合はGitHubの最新リリースから`deno-aarch64-apple-darwin.zip`をダウンロードし展開する。
 - yt-dlp/denoの取得と更新は「一時フォルダへダウンロード → 内容を検証 → 本体を置き換え → 前バージョンを削除」の順で行い、
   ダウンロード中も既存バイナリを残す。
@@ -81,7 +82,8 @@
 - 保存先フォルダが存在しない場合は作成する。
 - 出力テンプレートは`%(title)s.%(ext)s`を使用する。
 - yt-dlp実行時に`~/.vjdownloader/bin`をPATH先頭に追加する。
-- yt-dlpのstdout/stderrは行単位で読み取り、ログと進捗に反映する。
+- yt-dlpのstdout/stderrはUTF-8で行単位に読み取り、ログと進捗に反映する。
+- yt-dlpの生の進捗行はそのまま大量に表示せず、5%刻みの`ダウンロード進捗: n%`へ集約する。
 - ダウンロード中にStopを押した場合は実行中のプロセスを終了してキャンセルする。
 
 ## 動画ファイルのMP4変換
@@ -112,6 +114,8 @@
 ## ダウンロードオプション（共通）
 
 - `--no-playlist`を指定する。
+- Windowsを含めて日本語の動画名・パスを正しくログ表示するため、`--encoding utf-8`を指定する。
+- 進捗出力を安定して行単位で取得し、更新頻度を抑えるため、`--newline`と`--progress-delta 1`を指定する。
 - `--extractor-args youtube:player_client=web`を指定する。
 - `--extractor-args youtube:skip=translated_subs`を指定する。
 - `--concurrent-fragments 4`を指定する。
@@ -163,7 +167,7 @@
 - ffmpeg変換は`h264_videotoolbox`を必須とし、利用できない場合は処理を中断する。
 - ffmpeg変換ログは整形せずデフォルト出力をそのままステータスログへ出力する。
 - 直リンク取得に失敗した場合、または直リンク経路の`curl`/`ffmpeg`処理が失敗した場合は
-  `yt-dlp --no-playlist --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`
+  `yt-dlp --no-playlist --encoding utf-8 --newline --progress-delta 1 --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`
   の出力をffmpegへパイプする。
 - ffmpegは
   `-stats -analyzeduration 100M -probesize 100M -c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`
@@ -188,7 +192,7 @@
 - AnimeThemes URLはyt-dlpを使用せず、AnimeThemes
   API（失敗時はHTML解析）からWebM直リンクを取得してffmpegへ直接渡す。並行キャッシュは作成せず、シーク・ループ時も同じ直リンクを利用する。
 - 再生開始時にyt-dlpで総再生時間と直リンク（映像/音声URL）を取得する。
-- yt-dlpは`--no-playlist`・`youtube:player_client=web`・`youtube:skip=translated_subs`・`--js-runtimes <deno>`・
+- yt-dlpは`--no-playlist`・`--encoding utf-8`・`youtube:player_client=web`・`youtube:skip=translated_subs`・`--js-runtimes <deno>`・
   `-f bv*[height<=480]+ba/b[height<=480]/b`・`--print "DURATION:%(duration)s"`・`-g`で実行し、標準出力から`DURATION:`行と
   `http(s)`のURL行を解析する。
 - yt-dlp実行時は`~/.vjdownloader/bin`をPATH先頭に追加する。
@@ -282,22 +286,23 @@
 - 一覧は最終更新日時の降順で並べる。
 - 一覧の表示高は360pxで固定する。
 - リストが空の場合は`まだダウンロードがありません。`を表示する。
-- 行右端の`✕`ボタンで削除できる。
+- 行右端の×印ボタンで削除できる。×印はフォントに依存しない線画として表示する。
 - ファイル名は左寄せで表示する。
+- ファイル名は12pt、字間-1ptで表示し、狭いウィンドウでも表示文字数を確保する。
 - ファイル名の上下パディングは等間隔に揃える。
 - ファイル名が長い場合は末尾を`...`で省略する。
 
 ## Drag & Drop
 
-- リスト項目のドラッグでmacOSネイティブのファイルドラッグを開始する。
-- Finderと同様に、ドラッグ中はファイルアイコンが表示される。
+- リスト項目のドラッグでOSネイティブのファイルドラッグを開始する。
+- ドラッグ中はファイルアイコンが表示される。
 - ドロップ先へはファイル参照が渡る。
 - ファイル名を含むホバーでハイライトされる範囲全体がドラッグ対象。
 - ホバー時はマウスカーソルをポインタ表示に変更する。
 - 単クリックではドラッグを開始しない。
 - ドラッグは押下したまま移動したときに開始する。
 - ドラッグ開始時はファイルパスを正規化し、失敗時はステータスにエラーを表示する。
-- ドラッグ用アイコンはFinder同様にmacOSのファイルアイコンを使用し、過大表示しないサイズで表示する。
+- ドラッグ用アイコンは、macOSではシステムの書類アイコン、Windowsでは実行ファイルへ埋め込んだ32px PNGを使用し、実行時の作業ディレクトリに依存しない。macOSでシステムアイコンが見つからない場合も埋め込みPNGへフォールバックする。
 
 ## カーソル挙動
 
@@ -340,6 +345,12 @@
 - 設定画面とメインアプリの間はチャンネルで操作と結果を受け渡し、描画中の設定状態をメインアプリからロックしない。
 - 設定ウィンドウの表示状態はAtomicBoolで管理し、ロック失敗を理由とする高頻度の再描画要求は行わない。
 
+## Windowsの初回セットアップ
+
+- yt-dlpとDenoはWindowsの対象CPU（x64/ARM64）向け公式バイナリを取得し、`.exe`名で検証・保存・検出する。
+- DenoのZIPはWindows PowerShellから呼び出す.NETの`ZipFile::ExtractToDirectory`で展開する。パスは環境変数で渡し、空白・日本語・記号を含むパスを保護する。
+- macOSの取得先と展開方式は維持する。
+
 ## テーマとフォント
 
 - ダークテーマを適用する。
@@ -348,6 +359,7 @@
 - ボタンやパネルは角丸を使用する。
 - フォントはSF系フォントを優先し、無い場合はAvenir系を使用する。
 - 日本語フォントはHiragino Sans等のシステムフォントから順に使用する。
+- Windowsでは`SystemRoot`（未設定時は`WINDIR`、さらに未設定なら`C:\Windows`）配下のFontsから游ゴシック、メイリオ、MS ゴシックの順に読み込み、比例・等幅フォント双方の先頭に登録し、英字と日本語を同じフォントで描画してベースラインを揃える。macOSのフォント選択は変更しない。
 
 ## エラーハンドリング
 
@@ -423,6 +435,8 @@
 
 ## プラットフォーム依存実装の分離
 
+- Syphon出力はmacOSかつ`syphon`フィーチャー有効時のみ組み込み、Windowsでは通常のプレビュー処理を使用する。
+- 実行権限ビットの検査・付与はUnix環境のみで行う。Windowsでは通常ファイルの存在を確認し、外部ツールの起動可否は既存の実行時検証で確認する。
 - 対応プラットフォームはmacOSとWindowsの2つとし、それ以外のターゲットは`compile_error!`でビルドを止める。
 - OS固有APIの呼び出しは`src/platform/`配下にのみ置き、それ以外のモジュール（`download/`、`stream/`、`search_index/`、`ui`など）はプラットフォーム差分を持たない。
 - `src/platform/`は次の3つに分割する。
@@ -432,7 +446,7 @@
 - 実装の切り替えは`src/platform/mod.rs`の`#[cfg_attr(target_os = ..., path = ...)]`で行い、対象外のディレクトリはコンパイル対象から除外する。
 - 公開APIは`src/platform/mod.rs`でドメインごとに明示的に再エクスポートする。これにより両実装のAPI一致が強制され、片方への実装漏れはコンパイルエラーとなる。
 - Windows実装のうち、フォルダ選択（`IFileOpenDialog`）とIME判定（`GetKeyboardLayout` + IMM32）は実装済みである。
-- Windowsにはアプリケーションメニューが存在しないため、設定・ログ・通信速度測定・ストリーム再生・変換の起動口はアプリ内UIとして用意する。UI未実装のため、Windowsではこれらのサブ画面を開けない。
+- Windowsではメイン画面を右クリックすると、設定・ログ・通信速度測定・ストリーム再生・動画をMP4に変換のメニューを表示する。メニュー項目はダーク背景上で判読しやすい明るい文字色で表示する。選択すると対応するサブ画面を開き、メニューを閉じる。メニュー外クリックやEscでも閉じられる。macOSのネイティブメニューは変更しない。
 - サブ画面を開く要求は、macOSではネイティブメニュー、Windowsではアプリ内UIからフラグとして渡し、UIループが回収する。この受け渡し方式は両プラットフォームで共通とする。
 - 残作業は各ファイルの`TODO(windows)`に記載する。
 - `cargo check`は実行中のOS側のみを検証する。もう一方のターゲットの検証はCIまたは実機で行う。

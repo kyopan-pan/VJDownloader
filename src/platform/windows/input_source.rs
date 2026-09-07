@@ -51,7 +51,7 @@ fn japanese_layout_mode(hwnd: HWND) -> InputMode {
     let mut conversion = IME_CONVERSION_MODE(0);
     let acquired =
         unsafe { ImmGetConversionStatus(context, Some(&mut conversion), None) }.as_bool();
-    unsafe { ImmReleaseContext(hwnd, context) };
+    let _ = unsafe { ImmReleaseContext(hwnd, context) };
 
     if !acquired {
         return InputMode::English;

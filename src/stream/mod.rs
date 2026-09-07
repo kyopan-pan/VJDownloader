@@ -2,7 +2,7 @@ pub mod ui;
 
 // Syphon 出力（マスターを VDMX 等へ共有）。公式 Syphon.framework をリンクする
 // `syphon` フィーチャー有効時のみ有効化される。
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 pub mod syphon;
 
 use std::io::Read;
@@ -19,13 +19,13 @@ use crate::paths::{bin_dir, ffmpeg_path, yt_dlp_path};
 
 // デコード解像度（固定サイズの生RGBAフレーム）。
 // Syphon 出力時はマスターを高解像度で配信するため 1280x720、通常は軽量な 480x270。
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 pub const PREVIEW_WIDTH: usize = 1280;
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 pub const PREVIEW_HEIGHT: usize = 720;
-#[cfg(not(feature = "syphon"))]
+#[cfg(not(all(target_os = "macos", feature = "syphon")))]
 pub const PREVIEW_WIDTH: usize = 480;
-#[cfg(not(feature = "syphon"))]
+#[cfg(not(all(target_os = "macos", feature = "syphon")))]
 pub const PREVIEW_HEIGHT: usize = 270;
 
 // プレビューは固定フレームレート(CFR)でデコードし、フレーム番号から提示時刻(PTS)を算出する。
@@ -39,9 +39,9 @@ Sec-Fetch-Mode: navigate\r\n";
 const ANIMETHEMES_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-#[cfg(feature = "syphon")]
+#[cfg(all(target_os = "macos", feature = "syphon"))]
 const FORMAT_SELECTOR: &str = "bv*[height<=720]+ba/b[height<=720]/b";
-#[cfg(not(feature = "syphon"))]
+#[cfg(not(all(target_os = "macos", feature = "syphon")))]
 const FORMAT_SELECTOR: &str = "bv*[height<=480]+ba/b[height<=480]/b";
 
 // ストリーム再生中に UI へ通知するイベント。run_id で再生世代を識別する。
@@ -159,6 +159,8 @@ fn cache_media(
     let yt_dlp = yt_dlp_path();
     let mut cmd = Command::new(&yt_dlp);
     cmd.arg("--no-playlist")
+        .arg("--encoding")
+        .arg("utf-8")
         .args(cookie_args)
         .args([
             "--extractor-args",
@@ -261,7 +263,7 @@ fn resolve_media(
 
     println!("[stream] yt-dlp resolve start: {url}");
     let mut cmd = Command::new(&yt_dlp);
-    cmd.arg("--no-playlist");
+    cmd.arg("--no-playlist").arg("--encoding").arg("utf-8");
     cmd.args(cookie_args);
     cmd.args([
         "--extractor-args",

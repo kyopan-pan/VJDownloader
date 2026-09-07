@@ -34,14 +34,12 @@ pub fn run() -> eframe::Result<()> {
     let settings = SettingsData::load();
     let window_width = settings.window_width.parse::<f32>().unwrap_or(860.0);
     let window_height = settings.window_height.parse::<f32>().unwrap_or(1000.0);
-    let mut viewport = egui::ViewportBuilder::default()
+    let viewport = egui::ViewportBuilder::default()
         .with_inner_size([window_width, window_height])
         .with_min_inner_size([320.0, 320.0])
         .with_always_on_top();
     #[cfg(target_os = "macos")]
-    {
-        viewport = viewport.with_icon(egui::IconData::default());
-    }
+    let viewport = viewport.with_icon(egui::IconData::default());
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -308,18 +306,10 @@ impl DownloaderApp {
             }
         };
 
-        let icon_path = match drag_fallback_preview_icon_path() {
-            Some(path) => path,
-            None => {
-                self.push_status("ドラッグ用フォールバックアイコンが見つかりません。".to_string());
-                return;
-            }
-        };
-
         if let Err(err) = drag::start_drag(
             frame,
             DragItem::Files(vec![path]),
-            Image::File(icon_path),
+            drag_preview_image(),
             |_result, _position| {},
             Options::default(),
         ) {
@@ -629,6 +619,8 @@ impl eframe::App for DownloaderApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
         self.maintain_cursor_tracking(&ctx);
+        #[cfg(target_os = "windows")]
+        mac_menu::render_context_menu(root_ui);
         if mac_menu::take_open_settings_request() {
             self.settings_ui.open_settings();
         }
@@ -731,15 +723,18 @@ fn format_dimension(value: f32) -> String {
     }
 }
 
-fn drag_fallback_preview_icon_path() -> Option<PathBuf> {
+fn drag_preview_image() -> Image {
     #[cfg(target_os = "macos")]
     {
         let path = PathBuf::from(
             "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericDocumentIcon.icns",
         );
         if path.exists() {
-            return Some(path);
+            return Image::File(path);
         }
     }
-    None
+
+    // Windowsでは実行時の作業ディレクトリに依存しないよう、PNGを実行ファイルへ埋め込む。
+    // macOSでもシステムの書類アイコンが見つからない場合は同じ画像を使用する。
+    Image::Raw(include_bytes!("../assets/icon/App.iconset/icon_32x32.png").to_vec())
 }
