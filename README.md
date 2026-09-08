@@ -10,28 +10,33 @@ Rust + [eframe/egui](https://github.com/emilk/egui) 製の単一バイナリで�
 
 ## 主な機能
 
-- **クリップボードから即ダウンロード** — URLをコピーして `Download` を押すだけ。内部で [yt-dlp](https://github.com/yt-dlp/yt-dlp) を実行します。
-- **ダウンロード仕様を3種から選択** — `標準（H.264優先）` / `1080p上限` / `最高画質 + 変換`。
-- **ネイティブなドラッグ&ドロップ送出** — 一覧の行をドラッグしてVJソフトのビンへドロップできます。
-- **ローカル動画検索** — SQLiteインデックスによる高速検索。ファイル名と動画内のコメント/説明タグを対象に、
-  日本語の表記ゆれ（NFKC・全角半角・カタカナ/ひらがな）を吸収します。
-- **MP4変換** — WebM / MOV / MKV などをドロップしてH.264 MP4へ変換します。
-- **ストリーム再生 + Syphon出力**（macOSのみ） — URLの映像をウィンドウ内で再生しつつ、Syphonサーバーとして他アプリへ配信します。
-- **AnimeThemes.moe 専用パイプライン** — 直リンクの受信とMP4変換を並列実行します。
-- **Bot対策の検出** — YouTubeのレート制限や待機を検知し、進捗パネルとログに表示します。
-- **通信速度測定・ログ画面** — 回線速度の確認と、直近の動作ログの確認・コピーができます。
+- ダウンロード機能: クリップボードにコピーしているURLから動画情報を取得しダウンロード
+  - 通信環境に大きく左右されるが、約10秒少しで1080pの1分半の動画をダウンロード可能
+  - VJ用にチューニングしているため、現場で違和感なく利用できる仕様
+- VJソフトへの直送信: ダウンロードリストからVJソフトへドラッグ＆ドロップで送信可能
+- フォルダ内動画検索: 指定フォルダ内の動画ファイルを検索可能
+  - 日本語の表記ゆれ（NFKC・全角半角・カタカナ/ひらがな）を吸収します
+- mp4変換機能: WebM / MOV / MKV などの手元の動画をmp4の特定フォーマットに変換します
+- ストリーム再生 + Syphon出力（macOSのみ、動作不安定）: URLの映像をウィンドウ内で再生し、VJソフトへSyphon送信できます
+- Bot対策の検出: YouTubeのレート制限や待機を検知し、進捗パネルとログに表示します
+- 通信速度測定・ログ画面: 現場でのデバッグを助けるツールとして簡易的な通信速度測定とログ画面を実装しています
 
-明確に動作を保証しているサイトは **YouTube** と **AnimeThemes.moe** の2つです。
-yt-dlpが対応する他のサイトも動作する可能性はありますが、検証はしていません。
+
+### 動作を保証しているサイト
+- [YouTube](https://www.youtube.com/)
+- [AnimeThmes.moe](https://animethemes.moe/)
+
+上記の他に、yt-dlpが対応するサイトは基本ダウンロード可能ですが、速度向上のためのチューニングが適用されない可能性があります。
+サポート対象に追加して欲しいサイトがある場合は、Issueにて起票をお願いいたします。
 
 ## 動作環境
 
-| | macOS | Windows |
-| --- | --- | --- |
-| バージョン | macOS 13 Ventura 以降 | Windows 10 / 11 |
-| CPU | Apple Silicon (arm64) のみ | x64 / ARM64 |
-| ffmpeg | アプリに同梱 | 初回セットアップで自動取得 |
-| Syphon出力 | 対応 | 非対応 |
+|            | macOS                      | Windows                    |
+|------------|----------------------------|----------------------------|
+| バージョン | macOS 13 Ventura 以降      | Windows 10 / 11            |
+| CPU        | Apple Silicon (arm64) のみ | x64 / ARM64                |
+| ffmpeg     | アプリに同梱               | 初回セットアップで自動取得 |
+| Syphon出力 | 対応                       | 非対応                     |
 
 > **Intel Mac は非対応です。** 同梱しているffmpegがarm64ビルドのため動作しません。
 
@@ -56,17 +61,18 @@ xattr -dr com.apple.quarantine /Applications/VJDownloader.app
 ### Windows
 
 ビルド済みバイナリは配布していません。[ソースからビルド](#ソースからビルド)してください。
+今後対応予定です。
 
 ## 初回セットアップ
 
 初回起動時、必要な外部ツールが未導入なら初回セットアップ画面が開きます。
 `自動セットアップ` を押すと、各ツールを `~/.vjdownloader/bin` へ取得します。
 
-| ツール | 取得元 | 備考 |
-| --- | --- | --- |
-| yt-dlp | [yt-dlp](https://github.com/yt-dlp/yt-dlp) の最新リリース | 動画のダウンロードに使用 |
-| Deno | [deno](https://github.com/denoland/deno) の最新リリース | yt-dlpのJavaScriptランタイムとして使用 |
-| ffmpeg / ffprobe | macOS: アプリに同梱<br>Windows: [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) | 変換・再生・メタデータ取得に使用 |
+| ツール           | 取得元                                                                                      | 備考                                   |
+|------------------|---------------------------------------------------------------------------------------------|----------------------------------------|
+| yt-dlp           | [yt-dlp](https://github.com/yt-dlp/yt-dlp) の最新リリース                                   | 動画のダウンロードに使用               |
+| Deno             | [deno](https://github.com/denoland/deno) の最新リリース                                     | yt-dlpのJavaScriptランタイムとして使用 |
+| ffmpeg / ffprobe | macOS: アプリに同梱<br>Windows: [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) | 変換・再生・メタデータ取得に使用       |
 
 取得は「一時フォルダへダウンロード → 内容を検証 → 本体を置き換え」の順で行うため、
 失敗しても既存のバイナリは壊れません。
@@ -81,13 +87,13 @@ xattr -dr com.apple.quarantine /Applications/VJDownloader.app
 
 ### サブ画面の開き方
 
-| 画面 | macOS | Windows |
-| --- | --- | --- |
-| 設定 | `Cmd + ,` / Appメニュー `設定...` | 右クリックメニュー |
-| ログ | `Cmd + L` / Appメニュー `ログ...` | 右クリックメニュー |
-| 通信速度測定 | Appメニュー `通信速度測定...` | 右クリックメニュー |
-| ストリーム再生 | Appメニュー `ストリーム再生...` | 右クリックメニュー |
-| MP4変換 | Appメニュー `動画をMP4に変換...` | 右クリックメニュー |
+| 画面           | macOS                             | Windows            |
+|----------------|-----------------------------------|--------------------|
+| 設定           | `Cmd + ,` / Appメニュー `設定...` | 右クリックメニュー |
+| ログ           | `Cmd + L` / Appメニュー `ログ...` | 右クリックメニュー |
+| 通信速度測定   | Appメニュー `通信速度測定...`     | 右クリックメニュー |
+| ストリーム再生 | Appメニュー `ストリーム再生...`   | 右クリックメニュー |
+| MP4変換        | Appメニュー `動画をMP4に変換...`  | 右クリックメニュー |
 
 ### 設定
 
@@ -100,12 +106,12 @@ xattr -dr com.apple.quarantine /Applications/VJDownloader.app
 
 ### データの保存場所
 
-| パス | 内容 |
-| --- | --- |
-| `~/.vjdownloader/settings.properties` | 設定ファイル |
-| `~/.vjdownloader/bin/` | yt-dlp / Deno / ffmpeg / ffprobe |
-| `~/.vjdownloader/search_index.sqlite3` | 動画検索インデックス |
-| `~/Movies/VJDL/`（既定） | ダウンロード先 |
+| パス                                   | 内容                             |
+|----------------------------------------|----------------------------------|
+| `~/.vjdownloader/settings.properties`  | 設定ファイル                     |
+| `~/.vjdownloader/bin/`                 | yt-dlp / Deno / ffmpeg / ffprobe |
+| `~/.vjdownloader/search_index.sqlite3` | 動画検索インデックス             |
+| `~/Movies/VJDL/`（既定）               | ダウンロード先                   |
 
 アンインストールする際は、アプリ本体と `~/.vjdownloader` を削除してください。
 
@@ -158,7 +164,7 @@ cargo run                    # 起動
 ## ドキュメント
 
 - [docs/spec.md](docs/spec.md) — 仕様
-- [docs/search.md](docs/search.md) — 動画検索インデックスの設計
+- [docs/search.md](docs/search.md) — 動画検索周りの設計
 - [AGENTS.md](AGENTS.md) — 開発時の取り決め
 
 ## ライセンス
