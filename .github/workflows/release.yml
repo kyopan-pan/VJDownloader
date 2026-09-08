@@ -266,19 +266,33 @@ jobs:
             fi
           done
 
-          # プレリリース識別子（1.0.0-rc.1 など）を含むタグはプレリリース扱いにする
+          # releases/latest/download/<固定名> でREADMEから直リンクできるよう、
+          # バージョンを含まない別名を同じ内容で添付する。バージョン付きは
+          # 過去版の識別用に残すため、両方を添付する
+          DMG_ALIAS="dist/VJDownloader-macos-arm64.dmg"
+          ZIP_ALIAS="dist/VJDownloader-windows-x64.zip"
+          cp "${DMG_PATH}" "${DMG_ALIAS}"
+          cp "${ZIP_PATH}" "${ZIP_ALIAS}"
+
+          # プレリリース識別子（1.0.0-rc.1 など）を含むタグはプレリリース扱いにする。
+          # プレリリースは latest に選ばれないため、固定名リンクの参照先も変わらない
           PRERELEASE_FLAG=""
           case "${GITHUB_REF_NAME}" in
             *-*) PRERELEASE_FLAG="--prerelease" ;;
           esac
 
+          ASSETS=(
+            "${DMG_PATH}" "${ZIP_PATH}"
+            "${DMG_ALIAS}" "${ZIP_ALIAS}"
+            LICENSE THIRD_PARTY_NOTICES.md licenses/LGPL-2.1.txt
+          )
+
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" \
-              "${DMG_PATH}" "${ZIP_PATH}" LICENSE THIRD_PARTY_NOTICES.md licenses/LGPL-2.1.txt --clobber
+            gh release upload "${GITHUB_REF_NAME}" "${ASSETS[@]}" --clobber
           else
             gh release create "${GITHUB_REF_NAME}" \
               --title "VJDownloader ${APP_VERSION}" \
               --generate-notes \
               ${PRERELEASE_FLAG} \
-              "${DMG_PATH}" "${ZIP_PATH}" LICENSE THIRD_PARTY_NOTICES.md licenses/LGPL-2.1.txt
+              "${ASSETS[@]}"
           fi

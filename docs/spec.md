@@ -481,6 +481,7 @@
 - 残作業は各ファイルの`TODO(windows)`に記載する。
 - `cargo check`は実行中のOS側のみを検証する。もう一方のターゲットの検証はCIまたは実機で行う。
 - CIはmacOS（arm64）とWindows（x64）の両方をビルドする。配布物はmacOSが`.app`入りのDMG、Windowsが`.exe`とライセンス文書を入れたZIP。
+- リリースには、バージョン付きの配布物（`VJDownloader-<version>-macos-arm64.dmg` / `VJDownloader-<version>-windows-x64.zip`）と、内容が同一でバージョンを含まない別名（`VJDownloader-macos-arm64.dmg` / `VJDownloader-windows-x64.zip`）の両方を添付する。別名は`releases/latest/download/<固定名>`でREADMEから最新版へ直リンクするために必要で、バージョン付きは過去版の識別用に残す。
 - Windowsのビルドは`syphon`フィーチャーを無効化する（Syphon出力はmacOS限定のため）。
 
 ## 実装デフォルト値と変更方法

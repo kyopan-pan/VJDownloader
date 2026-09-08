@@ -1,5 +1,7 @@
 # VJDownloader
 
+[![Latest release](https://img.shields.io/github/v/release/kyopan-pan/VJDownloader)](https://github.com/kyopan-pan/VJDownloader/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/kyopan-pan/VJDownloader/total)](https://github.com/kyopan-pan/VJDownloader/releases)
 [![Build macOS](https://github.com/kyopan-pan/VJDownloader/actions/workflows/build-macos.yml/badge.svg)](https://github.com/kyopan-pan/VJDownloader/actions/workflows/build-macos.yml)
 [![Build Windows](https://github.com/kyopan-pan/VJDownloader/actions/workflows/build-windows.yml/badge.svg)](https://github.com/kyopan-pan/VJDownloader/actions/workflows/build-windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -43,9 +45,18 @@ Rust + [eframe/egui](https://github.com/emilk/egui) 製の単一バイナリで�
 
 ## インストール
 
+最新版のダウンロードリンクです。常に最新リリースへリダイレクトします。
+
+| プラットフォーム      | ダウンロード                                                                                                                     |
+|-----------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| macOS (Apple Silicon) | [VJDownloader-macos-arm64.dmg](https://github.com/kyopan-pan/VJDownloader/releases/latest/download/VJDownloader-macos-arm64.dmg) |
+| Windows (x64)         | [VJDownloader-windows-x64.zip](https://github.com/kyopan-pan/VJDownloader/releases/latest/download/VJDownloader-windows-x64.zip) |
+
+過去のバージョンは [Releases](https://github.com/kyopan-pan/VJDownloader/releases) から取得できます。
+
 ### macOS
 
-1. [Releases](https://github.com/kyopan-pan/VJDownloader/releases/latest) から `VJDownloader-<version>-macos-arm64.dmg` をダウンロードします。
+1. 上記の [VJDownloader-macos-arm64.dmg](https://github.com/kyopan-pan/VJDownloader/releases/latest/download/VJDownloader-macos-arm64.dmg) をダウンロードします。
 2. DMGを開き、`VJDownloader.app` を `アプリケーション` フォルダへドラッグします。
 3. 初回起動時はアプリを **右クリック（またはControl+クリック）して「開く」** を選びます。
 
@@ -61,7 +72,7 @@ xattr -dr com.apple.quarantine /Applications/VJDownloader.app
 
 ### Windows
 
-1. [Releases](https://github.com/kyopan-pan/VJDownloader/releases/latest) から `VJDownloader-<version>-windows-x64.zip` をダウンロードします。
+1. 上記の [VJDownloader-windows-x64.zip](https://github.com/kyopan-pan/VJDownloader/releases/latest/download/VJDownloader-windows-x64.zip) をダウンロードします。
 2. ZIPを展開し、`VJDownloader.exe` を任意のフォルダへ置きます。
 3. 初回起動時は SmartScreen の警告が出るため、`詳細情報` から `実行` を選びます。
 
