@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::converter::h264_encoder;
 use crate::fs_utils::{ensure_dir, is_executable};
@@ -25,6 +25,8 @@ const FFMPEG_WINDOWS_ARM64_URL: &str = "https://github.com/BtbN/FFmpeg-Builds/re
 static FFMPEG_INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // 一時作業フォルダの名前に付ける共通プレフィックス。
 const STAGING_PREFIX: &str = ".tool-staging-";
+// 別プロセスが使用中の一時フォルダを削除しないため、十分に古いものだけを掃除する。
+const STALE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 // 置き換え時に旧バージョンを一時退避させる名前のサフィックス。
 const OBSOLETE_SUFFIX: &str = ".obsolete-";
 
@@ -312,7 +314,7 @@ fn verify_staged_tool(path: &Path, label: &str) -> Result<(), String> {
     ensure_executable(path)?;
 
     let output = Command::new(path)
-        .arg("--version")
+        .arg(tool_version_arg(label))
         .output()
         .map_err(|err| format!("{label}の起動確認に失敗しました: {err}"))?;
     if !output.status.success() {
@@ -322,6 +324,14 @@ fn verify_staged_tool(path: &Path, label: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+// FFmpeg系は長いオプション形式の `--version` を受け付けない。
+fn tool_version_arg(label: &str) -> &'static str {
+    match label {
+        "ffmpeg" | "ffprobe" => "-version",
+        _ => "--version",
+    }
 }
 
 // 本体が存在し、バイナリとして成立しているかを判定する。
@@ -364,11 +374,19 @@ fn cleanup_stale_staging_dirs(work_dir: &Path) {
             // 同一プロセスの進行中フォルダは消さない。
             continue;
         }
-        if name.contains(&pid_marker) {
+        if name.contains(&pid_marker) || !is_stale_staging_dir(&entry.path()) {
             continue;
         }
         let _ = fs::remove_dir_all(entry.path());
     }
+}
+
+fn is_stale_staging_dir(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age >= STALE_STAGING_AGE)
 }
 
 // 対象ツールの前バージョン（退避ファイルと旧仕様のバックアップ）を削除する。
@@ -654,7 +672,8 @@ mod tests {
 
     use super::{
         MIN_TOOL_BYTES, common_yt_dlp_args, install_tool_staged, is_usable_tool,
-        previous_version_paths, replace_tool, restore_interrupted_update, verify_staged_tool,
+        previous_version_paths, replace_tool, restore_interrupted_update, tool_version_arg,
+        verify_staged_tool,
     };
 
     // --version に応答し、サイズ下限も満たすダミーバイナリを作る。
@@ -688,6 +707,14 @@ mod tests {
         fs::write(&staged, b"<html>404</html>").unwrap();
 
         assert!(verify_staged_tool(&staged, "yt-dlp").is_err());
+    }
+
+    #[test]
+    fn uses_ffmpeg_compatible_version_argument() {
+        assert_eq!(tool_version_arg("ffmpeg"), "-version");
+        assert_eq!(tool_version_arg("ffprobe"), "-version");
+        assert_eq!(tool_version_arg("yt-dlp"), "--version");
+        assert_eq!(tool_version_arg("deno"), "--version");
     }
 
     #[test]
