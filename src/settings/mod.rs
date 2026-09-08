@@ -209,7 +209,7 @@ fn read_chrome_profiles_from_local_state(path: &PathBuf) -> Vec<ChromeProfile> {
             })
         })
         .collect();
-    profiles.sort_by(|a, b| chrome_profile_sort_key(&a.id).cmp(&chrome_profile_sort_key(&b.id)));
+    profiles.sort_by_key(|a| chrome_profile_sort_key(&a.id));
     profiles
 }
 
@@ -249,7 +249,7 @@ fn read_properties_from_path(path: &PathBuf) -> Option<HashMap<String, String>> 
         if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
             continue;
         }
-        let mut split = line.splitn(2, |c| c == '=' || c == ':');
+        let mut split = line.splitn(2, ['=', ':']);
         let key = split.next().unwrap_or("").trim();
         let value = split.next().unwrap_or("").trim();
         if !key.is_empty() {

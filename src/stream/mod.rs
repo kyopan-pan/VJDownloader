@@ -599,26 +599,21 @@ fn read_frames<R: Read>(
     let mut buf = vec![0u8; FRAME_BYTES];
     let mut index: u64 = 0;
     let mut receiver_closed = false;
-    loop {
-        match reader.read_exact(&mut buf) {
-            Ok(()) => {
-                let frame = StreamFrame {
-                    run_id,
-                    pts: start_offset + index as f64 / PREVIEW_FPS,
-                    size: [PREVIEW_WIDTH, PREVIEW_HEIGHT],
-                    rgba: buf.clone(),
-                };
-                match frame_tx.try_send(frame) {
-                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        receiver_closed = true;
-                        break;
-                    }
-                }
-                index += 1;
+    while let Ok(()) = reader.read_exact(&mut buf) {
+        let frame = StreamFrame {
+            run_id,
+            pts: start_offset + index as f64 / PREVIEW_FPS,
+            size: [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+            rgba: buf.clone(),
+        };
+        match frame_tx.try_send(frame) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                receiver_closed = true;
+                break;
             }
-            Err(_) => break,
         }
+        index += 1;
     }
     (index, receiver_closed)
 }

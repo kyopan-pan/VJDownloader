@@ -85,10 +85,10 @@ fn install_fonts(
         }
     }
 
-    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-        if fonts.font_data.contains_key("jp") {
-            family.push("jp".to_string());
-        }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace)
+        && fonts.font_data.contains_key("jp")
+    {
+        family.push("jp".to_string());
     }
 }
 

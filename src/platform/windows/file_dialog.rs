@@ -2,8 +2,8 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-    CoUninitialize, IBindCtx,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoTaskMemFree, CoUninitialize, IBindCtx,
 };
 use windows::Win32::UI::Shell::{
     FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
@@ -26,7 +26,8 @@ pub fn choose_directory(current: Option<&Path>) -> Option<PathBuf> {
 
 unsafe fn show_folder_dialog(current: Option<&Path>) -> Option<PathBuf> {
     let dialog: IFileOpenDialog =
-        unsafe { CoCreateInstance(&FileOpenDialog, None::<&IUnknown>, CLSCTX_INPROC_SERVER) }.ok()?;
+        unsafe { CoCreateInstance(&FileOpenDialog, None::<&IUnknown>, CLSCTX_INPROC_SERVER) }
+            .ok()?;
 
     // フォルダのみ選択可・実在するファイルシステム上のパスに限定する。
     // 仮想フォルダ（ライブラリ等）を除外しないと GetDisplayName でパスを取得できない。
@@ -56,8 +57,7 @@ unsafe fn show_folder_dialog(current: Option<&Path>) -> Option<PathBuf> {
 unsafe fn shell_item_from_path(path: &Path) -> Option<IShellItem> {
     let path_str = path.to_str()?;
     let wide = HSTRING::from(path_str);
-    let item: IShellItem =
-        unsafe { SHCreateItemFromParsingName(&wide, None::<&IBindCtx>) }.ok()?;
+    let item: IShellItem = unsafe { SHCreateItemFromParsingName(&wide, None::<&IBindCtx>) }.ok()?;
     Some(item)
 }
 

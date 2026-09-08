@@ -289,10 +289,11 @@ impl StreamDeck {
             return scrub;
         }
         let mut position = self.position;
-        if self.running && !self.paused {
-            if let Some(instant) = self.position_instant {
-                position += instant.elapsed().as_secs_f64();
-            }
+        if self.running
+            && !self.paused
+            && let Some(instant) = self.position_instant
+        {
+            position += instant.elapsed().as_secs_f64();
         }
         if let Some(duration) = self.duration {
             position = position.clamp(0.0, duration);
@@ -996,17 +997,16 @@ fn render_deck_seek_bar(ui: &mut egui::Ui, deck: &mut StreamDeck) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, bar_height), sense);
 
     let mut commit_target = None;
-    if seekable {
-        if let Some(dur) = duration {
-            if (response.dragged() || response.clicked()) && dur > 0.0 {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let fraction = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                    deck.scrubbing = Some(fraction as f64 * dur);
-                }
-            }
-            if response.drag_stopped() || response.clicked() {
-                commit_target = deck.scrubbing.take();
-            }
+    if seekable && let Some(dur) = duration {
+        if (response.dragged() || response.clicked())
+            && dur > 0.0
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let fraction = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            deck.scrubbing = Some(fraction as f64 * dur);
+        }
+        if response.drag_stopped() || response.clicked() {
+            commit_target = deck.scrubbing.take();
         }
     }
 

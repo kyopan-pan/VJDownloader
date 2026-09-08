@@ -36,7 +36,7 @@ pub fn load_mp4_files(dir: &Path) -> Vec<PathBuf> {
         items.push((path, modified));
     }
 
-    items.sort_by(|a, b| b.1.cmp(&a.1));
+    items.sort_by_key(|item| std::cmp::Reverse(item.1));
     items.into_iter().map(|(path, _)| path).collect()
 }
 

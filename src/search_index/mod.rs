@@ -532,7 +532,9 @@ mod tests {
         write_dummy(&root.join("保存.MKV"), 64);
         write_dummy(&root.join("ignore.txt"), 64);
 
-        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine
+            .sync_roots(std::slice::from_ref(&root))
+            .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
 
@@ -598,7 +600,9 @@ mod tests {
         write_dummy(&root.join("small.mp4"), 8);
         write_dummy(&root.join("large.mp4"), 8_192);
 
-        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine
+            .sync_roots(std::slice::from_ref(&root))
+            .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
 
@@ -621,7 +625,9 @@ mod tests {
         let root = temp.path().join("videos");
         fs::create_dir_all(&root).expect("create root");
 
-        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine
+            .sync_roots(std::slice::from_ref(&root))
+            .expect("sync roots");
         thread::sleep(Duration::from_millis(200));
 
         let added = root.join("追加.mp4");
@@ -679,7 +685,9 @@ mod tests {
         fs::create_dir_all(&root).expect("create root");
 
         write_dummy(&root.join("100%_test.mp4"), 64);
-        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine
+            .sync_roots(std::slice::from_ref(&root))
+            .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
 
@@ -702,7 +710,9 @@ mod tests {
 
         write_dummy(&root.join("ふ・れ・ん・ど・し・た・い.mp4"), 64);
         write_dummy(&root.join("ふ・た・り.mp4"), 64);
-        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine
+            .sync_roots(std::slice::from_ref(&root))
+            .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
 
@@ -737,7 +747,9 @@ mod tests {
         let video_path = root.join("ライブ映像.mp4");
         write_dummy(&video_path, 64);
 
-        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine
+            .sync_roots(std::slice::from_ref(&root))
+            .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
 
@@ -780,7 +792,9 @@ mod tests {
         fs::create_dir_all(&root).expect("create root");
         write_dummy(&root.join("ウザい映像.mp4"), 64);
 
-        engine.sync_roots(&[root.clone()]).expect("sync roots");
+        engine
+            .sync_roots(std::slice::from_ref(&root))
+            .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
 

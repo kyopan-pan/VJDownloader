@@ -523,7 +523,7 @@ fn unique_output_path(input: &Path, output_dir: &Path) -> PathBuf {
     let stem = input
         .file_stem()
         .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| input.as_os_str())
+        .unwrap_or(input.as_os_str())
         .to_string_lossy();
     let first = output_dir.join(format!("{stem}.mp4"));
     if !first.exists() {

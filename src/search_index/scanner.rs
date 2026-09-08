@@ -216,7 +216,7 @@ pub(super) fn build_record_from_path(
     }
 
     let file_name = path.file_name()?.to_string_lossy().to_string();
-    let parent_dir = path.parent().map(path_to_key).unwrap_or_else(String::new);
+    let parent_dir = path.parent().map(path_to_key).unwrap_or_default();
     let modified_time = metadata
         .modified()
         .map(system_time_to_epoch_secs)

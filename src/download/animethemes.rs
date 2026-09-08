@@ -449,18 +449,17 @@ fn handle_ffmpeg_conversion_line(
         return;
     }
 
-    if let Some(total) = total_seconds {
-        if total > 0.0 {
-            if let Some(current) = parse_ffmpeg_time_seconds(trimmed) {
-                let percent = ((current / total) * 100.0).clamp(0.0, 100.0) as f32;
-                if percent >= *last_percent + 0.2 || percent >= 99.9 {
-                    *last_percent = percent;
-                    let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::converting(
-                        percent,
-                        &progress.elapsed(),
-                    )));
-                }
-            }
+    if let Some(total) = total_seconds
+        && total > 0.0
+        && let Some(current) = parse_ffmpeg_time_seconds(trimmed)
+    {
+        let percent = ((current / total) * 100.0).clamp(0.0, 100.0) as f32;
+        if percent >= *last_percent + 0.2 || percent >= 99.9 {
+            *last_percent = percent;
+            let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::converting(
+                percent,
+                &progress.elapsed(),
+            )));
         }
     }
 
@@ -921,10 +920,10 @@ fn requested_theme_version(page_theme_slug: &str) -> Option<i64> {
 fn theme_matches_slug(theme: &Value, theme_slug: &str) -> bool {
     let attributes = theme.get("attributes").unwrap_or(theme);
 
-    if let Some(slug) = attributes.get("slug").and_then(Value::as_str) {
-        if is_matching_theme_identifier(theme_slug, slug) {
-            return true;
-        }
+    if let Some(slug) = attributes.get("slug").and_then(Value::as_str)
+        && is_matching_theme_identifier(theme_slug, slug)
+    {
+        return true;
     }
 
     let Some(theme_type) = attributes.get("type").and_then(Value::as_str) else {
@@ -1039,10 +1038,10 @@ fn build_animethemes_output_path(url: &str, output_dir: &Path) -> PathBuf {
         }
     }
 
-    if picked.is_empty() {
-        if let Some(last) = segments.last() {
-            picked.push(last.clone());
-        }
+    if picked.is_empty()
+        && let Some(last) = segments.last()
+    {
+        picked.push(last.clone());
     }
 
     let base = picked.join("-");

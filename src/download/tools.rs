@@ -620,6 +620,32 @@ fn curl_download(url: &str, output_path: &Path, label: &str) -> Result<(), Strin
     }
 }
 
+fn extract_tool_zip(zip_path: &Path, destination: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let output = Command::new("powershell.exe")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:VJDL_ZIP_PATH, $env:VJDL_ZIP_DEST)"])
+        .env("VJDL_ZIP_PATH", zip_path)
+        .env("VJDL_ZIP_DEST", destination)
+        .output();
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("unzip")
+        .arg("-o")
+        .arg(zip_path)
+        .arg("-d")
+        .arg(destination)
+        .output();
+    let output = output.map_err(|err| format!("ZIP展開処理の起動に失敗しました: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ZIPの展開に失敗しました: {} {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -721,32 +747,6 @@ mod tests {
                 .any(|pair| pair[0] == "--progress-delta" && pair[1] == "1")
         );
     }
-}
-
-fn extract_tool_zip(zip_path: &Path, destination: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let output = Command::new("powershell.exe")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-            "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:VJDL_ZIP_PATH, $env:VJDL_ZIP_DEST)"])
-        .env("VJDL_ZIP_PATH", zip_path)
-        .env("VJDL_ZIP_DEST", destination)
-        .output();
-    #[cfg(not(target_os = "windows"))]
-    let output = Command::new("unzip")
-        .arg("-o")
-        .arg(zip_path)
-        .arg("-d")
-        .arg(destination)
-        .output();
-    let output = output.map_err(|err| format!("ZIP展開処理の起動に失敗しました: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "ZIPの展開に失敗しました: {} {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(all(test, target_os = "windows"))]

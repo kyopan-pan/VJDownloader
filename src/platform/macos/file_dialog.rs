@@ -10,12 +10,12 @@ pub fn choose_directory(current: Option<&Path>) -> Option<PathBuf> {
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
 
-    if let Some(path) = current {
-        if let Some(path_str) = path.to_str() {
-            let ns_path = NSString::from_str(path_str);
-            let url = NSURL::fileURLWithPath_isDirectory(&ns_path, true);
-            panel.setDirectoryURL(Some(&url));
-        }
+    if let Some(path) = current
+        && let Some(path_str) = path.to_str()
+    {
+        let ns_path = NSString::from_str(path_str);
+        let url = NSURL::fileURLWithPath_isDirectory(&ns_path, true);
+        panel.setDirectoryURL(Some(&url));
     }
 
     let response = panel.runModal();

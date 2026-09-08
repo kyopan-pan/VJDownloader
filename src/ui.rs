@@ -49,7 +49,7 @@ pub fn render(
         .resizable(true)
         .default_size(default_download_width)
         .size_range(min_download_width..=max_download_width)
-        .frame(panel_frame.clone())
+        .frame(panel_frame)
         .show(root_ui, |ui| {
             render_download_section(ui, &ctx, app, frame);
         });
@@ -773,7 +773,7 @@ fn truncate_with_ellipsis(
     let mut low = 0usize;
     let mut high = chars.len();
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         let candidate: String = chars[..mid].iter().collect();
         let width = text_width(ui, &(candidate.clone() + ellipsis), font_id);
         if width <= max_width {

@@ -638,20 +638,20 @@ impl eframe::App for DownloaderApp {
         if mac_menu::take_open_settings_request() {
             self.settings_ui.open_settings();
         }
-        if mac_menu::take_open_logs_request() {
-            if let Ok(mut state) = self.log_ui.lock() {
-                state.open_logs();
-            }
+        if mac_menu::take_open_logs_request()
+            && let Ok(mut state) = self.log_ui.lock()
+        {
+            state.open_logs();
         }
-        if mac_menu::take_open_speed_test_request() {
-            if let Ok(mut state) = self.speed_test_ui.lock() {
-                state.open_speed_test();
-            }
+        if mac_menu::take_open_speed_test_request()
+            && let Ok(mut state) = self.speed_test_ui.lock()
+        {
+            state.open_speed_test();
         }
-        if mac_menu::take_open_stream_request() {
-            if let Ok(mut state) = self.stream_ui.lock() {
-                state.open_stream();
-            }
+        if mac_menu::take_open_stream_request()
+            && let Ok(mut state) = self.stream_ui.lock()
+        {
+            state.open_stream();
         }
         if mac_menu::take_open_converter_request() {
             self.converter_ui.open();
