@@ -1,6 +1,7 @@
 # VJDownloader
 
 [![Build macOS](https://github.com/kyopan-pan/VJDownloader/actions/workflows/build-macos.yml/badge.svg)](https://github.com/kyopan-pan/VJDownloader/actions/workflows/build-macos.yml)
+[![Build Windows](https://github.com/kyopan-pan/VJDownloader/actions/workflows/build-windows.yml/badge.svg)](https://github.com/kyopan-pan/VJDownloader/actions/workflows/build-windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 クリップボードのURLから動画をダウンロードし、ローカルのMP4を管理・送出するVJ向けデスクトップアプリです。
@@ -60,8 +61,13 @@ xattr -dr com.apple.quarantine /Applications/VJDownloader.app
 
 ### Windows
 
-ビルド済みバイナリは配布していません。[ソースからビルド](#ソースからビルド)してください。
-今後対応予定です。
+1. [Releases](https://github.com/kyopan-pan/VJDownloader/releases/latest) から `VJDownloader-<version>-windows-x64.zip` をダウンロードします。
+2. ZIPを展開し、`VJDownloader.exe` を任意のフォルダへ置きます。
+3. 初回起動時は SmartScreen の警告が出るため、`詳細情報` から `実行` を選びます。
+
+コード署名を行っていないため、`Windows によって PC が保護されました` と表示されます。
+
+配布しているのは x64 版のみです。ARM64 環境では [ソースからビルド](#ソースからビルド)してください。
 
 ## 初回セットアップ
 

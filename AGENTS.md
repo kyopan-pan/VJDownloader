@@ -22,8 +22,8 @@ cargo run                        # 起動（macOS）
 
 - 既定フィーチャーは `syphon`。無効化する場合は `--no-default-features`。
 - Windows ターゲットのツールチェーンは未導入。型チェックしたい場合は `rustup target add x86_64-pc-windows-msvc` を追加してから `cargo check --target x86_64-pc-windows-msvc` を使う（リンクは不可）。
-- CI（`.github/workflows/build-macos.yml`）は macOS のみをビルドする。Windows の動作確認は実機で行う。
-- リリースは `.github/workflows/release.yml` がバージョンタグ（`v*` または `0.0.0` 形式）の push で公開する。タグと `Cargo.toml` の `version` が一致しない場合はワークフローが失敗する。
+- CI は macOS（`.github/workflows/build-macos.yml`）と Windows（`.github/workflows/build-windows.yml`）をそれぞれビルドする。Windows は x64 のみで、`--no-default-features`（syphon 無効）でビルドする。実際の動作確認は実機で行う。
+- リリースは `.github/workflows/release.yml` がバージョンタグ（`v*` または `0.0.0` 形式）の push で公開する。macOS の DMG と Windows の ZIP を別ジョブでビルドし、両方揃ってから `publish` ジョブが1つのリリースへ添付する。タグと `Cargo.toml` の `version` が一致しない場合はワークフローが失敗する。
 
 ## 完了条件
 
