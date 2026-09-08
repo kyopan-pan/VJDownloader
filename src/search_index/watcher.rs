@@ -60,11 +60,11 @@ pub(super) fn watcher_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
 
-        if should_flush_pending(&pending) {
-            if let Err(err) = flush_pending_changes(&mut pending, &watched_roots, &write_tx) {
-                eprintln!("[search-index] failed to flush watcher changes: {err}");
-                trigger_reindex_all_from_db(&db_path, &write_tx);
-            }
+        if should_flush_pending(&pending)
+            && let Err(err) = flush_pending_changes(&mut pending, &watched_roots, &write_tx)
+        {
+            eprintln!("[search-index] failed to flush watcher changes: {err}");
+            trigger_reindex_all_from_db(&db_path, &write_tx);
         }
     }
 }
@@ -169,14 +169,14 @@ fn flush_pending_changes(
                 continue;
             }
 
-            if let Some(root_id) = find_root_id_for_path(&path, roots) {
-                if let Some(record) = build_record_from_path(root_id, &path, epoch_millis(), None) {
-                    write_tx
-                        .send(WriteCommand::UpsertFiles {
-                            files: vec![record],
-                        })
-                        .map_err(|err| err.to_string())?;
-                }
+            if let Some(root_id) = find_root_id_for_path(&path, roots)
+                && let Some(record) = build_record_from_path(root_id, &path, epoch_millis(), None)
+            {
+                write_tx
+                    .send(WriteCommand::UpsertFiles {
+                        files: vec![record],
+                    })
+                    .map_err(|err| err.to_string())?;
             }
         } else {
             collect_delete_target(&path, &mut delete_paths, &mut delete_prefixes);

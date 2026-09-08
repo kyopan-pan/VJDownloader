@@ -8,7 +8,7 @@ use arboard::Clipboard;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +19,9 @@ use crate::paths::{ffmpeg_path, yt_dlp_path};
 
 pub use guard::{BotGuardState, GuardNotice, is_youtube_url};
 pub use tools::{ensure_deno, ensure_yt_dlp, js_runtime_arg, update_deno, update_yt_dlp};
+// Windowsはffmpeg/ffprobeを同梱しないため、取得処理を外部へ公開する。
+#[cfg(target_os = "windows")]
+pub use tools::ensure_ffmpeg_tools;
 
 pub enum DownloadEvent {
     Log(String),
@@ -181,6 +184,7 @@ pub(super) struct ProgressContext {
     active: Arc<AtomicBool>,
     progress_started: AtomicBool,
     post_processing: AtomicBool,
+    last_logged_percent: AtomicU32,
 }
 
 impl ProgressContext {
@@ -191,6 +195,7 @@ impl ProgressContext {
             active,
             progress_started: AtomicBool::new(false),
             post_processing: AtomicBool::new(false),
+            last_logged_percent: AtomicU32::new(0),
         })
     }
 
@@ -216,6 +221,25 @@ impl ProgressContext {
 
     pub(super) fn set_post_processing(&self) {
         self.post_processing.store(true, Ordering::Relaxed);
+    }
+
+    // yt-dlp の細かな生進捗を、メディアごとに5%刻みのログへ集約する。
+    pub(super) fn next_log_percent(&self, percent: f32) -> Option<u32> {
+        let bucket = ((percent.clamp(0.0, 100.0) / 5.0).floor() as u32) * 5;
+        let previous = self.last_logged_percent.load(Ordering::Relaxed);
+
+        // 映像の後に音声の取得が始まると進捗率が0%付近へ戻る。
+        if bucket < previous {
+            self.last_logged_percent.store(0, Ordering::Relaxed);
+        }
+        if bucket == 0 {
+            return None;
+        }
+
+        let previous = self
+            .last_logged_percent
+            .fetch_max(bucket, Ordering::Relaxed);
+        (bucket > previous).then_some(bucket)
     }
 
     pub(super) fn post_processing(&self) -> bool {
@@ -381,6 +405,9 @@ fn run_download_inner(
     }
 
     // 必須ツールの存在確認を先に行う。
+    // Windowsは起動時のバックグラウンド取得が終わっていない場合があるため、ここでも取得を試みる。
+    #[cfg(target_os = "windows")]
+    tools::ensure_ffmpeg_tools(Some(tx))?;
     ensure_bundled_tools()?;
     let ffmpeg = ffmpeg_path();
     if !ffmpeg.exists() {

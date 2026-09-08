@@ -15,6 +15,11 @@ const BOT_BLOCKED_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 38, 38);
 const BOT_WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(250, 204, 21);
 // 警告テキスト用の読みやすい黄色。
 const BOT_WARNING_TEXT_COLOR: egui::Color32 = egui::Color32::from_rgb(253, 224, 71);
+// 狭いペインでもファイル名を読み取りやすくする一覧専用の文字設定。
+const FILE_NAME_FONT_SIZE: f32 = 12.0;
+const FILE_NAME_LETTER_SPACING: f32 = -1.0;
+// 字間を詰めると空白まで狭まり単語の切れ目が読み取りにくくなるため、空白だけは逆に広げる。
+const FILE_NAME_SPACE_LETTER_SPACING: f32 = 1.0;
 
 pub fn render(
     // UI全体の状態とアクションの入口
@@ -44,7 +49,7 @@ pub fn render(
         .resizable(true)
         .default_size(default_download_width)
         .size_range(min_download_width..=max_download_width)
-        .frame(panel_frame.clone())
+        .frame(panel_frame)
         .show(root_ui, |ui| {
             render_download_section(ui, &ctx, app, frame);
         });
@@ -415,7 +420,7 @@ fn render_search_results_list(
                 .collect::<Vec<_>>();
             let previous_spacing = ui.spacing().item_spacing;
             ui.spacing_mut().item_spacing = egui::vec2(previous_spacing.x, 0.0);
-            let font_id = egui::FontId::proportional(13.5);
+            let font_id = egui::FontId::proportional(FILE_NAME_FONT_SIZE);
 
             // ファイルリストの表示UIを制御
             for (file_name, path_string) in &entries {
@@ -465,7 +470,7 @@ fn render_download_list(
             let mut remove_paths = Vec::new();
             let previous_spacing = ui.spacing().item_spacing;
             ui.spacing_mut().item_spacing = egui::vec2(previous_spacing.x, 0.0);
-            let font_id = egui::FontId::proportional(13.5);
+            let font_id = egui::FontId::proportional(FILE_NAME_FONT_SIZE);
             for path in &files {
                 let filename = path
                     .file_name()
@@ -551,14 +556,13 @@ fn render_file_row(
     let text_color = egui::Color32::from_rgb(220, 230, 245);
     // テキストの垂直位置を微調整（視覚的な中央揃えのため少し上にずらす）
     let text_offset_y = -2.0;
-    let text_pos = egui::pos2(inner_rect.left(), inner_rect.center().y + text_offset_y);
-    ui.painter().text(
-        text_pos,
-        egui::Align2::LEFT_CENTER,
-        text,
-        font_id.clone(),
-        text_color,
+    let galley =
+        ui.fonts_mut(|fonts| fonts.layout_job(file_name_layout_job(&text, font_id, text_color)));
+    let text_pos = egui::pos2(
+        inner_rect.left(),
+        inner_rect.center().y - galley.size().y * 0.5 + text_offset_y,
     );
+    ui.painter().galley(text_pos, galley, text_color);
 
     let mut drag_rect = row_rect;
     let mut should_remove = false;
@@ -581,13 +585,7 @@ fn render_file_row(
             egui::Color32::from_rgb(200, 210, 230)
         };
         let remove_response = pointing(ui.interact(remove_rect, remove_id, egui::Sense::click()));
-        ui.painter().text(
-            remove_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "✕",
-            egui::FontId::proportional(15.0),
-            remove_color,
-        );
+        paint_remove_cross(ui.painter(), remove_rect.center(), remove_color);
         if remove_response.clicked() {
             should_remove = true;
         }
@@ -604,6 +602,20 @@ fn render_file_row(
     }
 
     should_remove
+}
+
+// フォントに削除記号のグリフがなくても文字化けしないよう、×印を線分で描画する。
+fn paint_remove_cross(painter: &egui::Painter, center: egui::Pos2, color: egui::Color32) {
+    let offset = egui::vec2(4.0, 4.0);
+    let stroke = egui::Stroke::new(1.5, color);
+    painter.line_segment([center - offset, center + offset], stroke);
+    painter.line_segment(
+        [
+            center + egui::vec2(-offset.x, offset.y),
+            center + egui::vec2(offset.x, -offset.y),
+        ],
+        stroke,
+    );
 }
 
 fn render_progress_panel(
@@ -761,7 +773,7 @@ fn truncate_with_ellipsis(
     let mut low = 0usize;
     let mut high = chars.len();
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         let candidate: String = chars[..mid].iter().collect();
         let width = text_width(ui, &(candidate.clone() + ellipsis), font_id);
         if width <= max_width {
@@ -785,7 +797,88 @@ fn text_width(
     font_id: &egui::FontId,
 ) -> f32 {
     ui.fonts_mut(|fonts| {
-        let galley = fonts.layout_no_wrap(text.to_string(), font_id.clone(), egui::Color32::WHITE);
-        galley.size().x
+        fonts
+            .layout_job(file_name_layout_job(text, font_id, egui::Color32::WHITE))
+            .size()
+            .x
     })
+}
+
+fn file_name_layout_job(
+    text: &str,
+    font_id: &egui::FontId,
+    color: egui::Color32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    // 空白の連なりと文字の連なりで字間を変え、詰めた字間でも単語の区切りを残す。
+    for (is_space, run) in whitespace_runs(text) {
+        job.append(
+            run,
+            0.0,
+            egui::TextFormat {
+                font_id: font_id.clone(),
+                extra_letter_spacing: if is_space {
+                    FILE_NAME_SPACE_LETTER_SPACING
+                } else {
+                    FILE_NAME_LETTER_SPACING
+                },
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
+// 文字列を空白の連なりと非空白の連なりへ交互に分割する。
+fn whitespace_runs(text: &str) -> Vec<(bool, &str)> {
+    let mut runs = Vec::new();
+    let mut start = 0usize;
+    let mut current: Option<bool> = None;
+    for (index, ch) in text.char_indices() {
+        let is_space = ch.is_whitespace();
+        if current == Some(is_space) {
+            continue;
+        }
+        if let Some(previous) = current {
+            runs.push((previous, &text[start..index]));
+        }
+        start = index;
+        current = Some(is_space);
+    }
+    if let Some(previous) = current {
+        runs.push((previous, &text[start..]));
+    }
+    runs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::whitespace_runs;
+
+    #[test]
+    fn splits_file_name_into_alternating_space_and_text_runs() {
+        assert_eq!(
+            whitespace_runs("My Video 01.mp4"),
+            vec![
+                (false, "My"),
+                (true, " "),
+                (false, "Video"),
+                (true, " "),
+                (false, "01.mp4"),
+            ]
+        );
+        // 全角スペースと連続スペースもまとめて空白として扱う。
+        assert_eq!(
+            whitespace_runs("日本語　の  動画"),
+            vec![
+                (false, "日本語"),
+                (true, "　"),
+                (false, "の"),
+                (true, "  "),
+                (false, "動画"),
+            ]
+        );
+        assert_eq!(whitespace_runs(""), vec![]);
+    }
 }

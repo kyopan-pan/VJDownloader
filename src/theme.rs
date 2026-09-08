@@ -43,6 +43,7 @@ pub fn apply_theme(
     ctx.set_fonts(fonts);
 }
 
+#[cfg(not(target_os = "windows"))]
 fn install_fonts(
     // 登録済みフォント定義への追加先
     fonts: &mut egui::FontDefinitions,
@@ -84,13 +85,14 @@ fn install_fonts(
         }
     }
 
-    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-        if fonts.font_data.contains_key("jp") {
-            family.push("jp".to_string());
-        }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace)
+        && fonts.font_data.contains_key("jp")
+    {
+        family.push("jp".to_string());
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn load_first_font(
     // 探索するフォントファイル候補一覧
     paths: &[&str],
@@ -101,4 +103,69 @@ fn load_first_font(
         }
     }
     None
+}
+
+// Windowsでは英字と日本語に同じフォントを優先してベースラインを揃える。
+#[cfg(target_os = "windows")]
+fn install_fonts(fonts: &mut egui::FontDefinitions) {
+    let windows_dir = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("WINDIR"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let fonts_dir = windows_dir.join("Fonts");
+    for name in ["YuGothM.ttc", "meiryo.ttc", "msgothic.ttc"] {
+        if let Ok(bytes) = std::fs::read(fonts_dir.join(name)) {
+            fonts.font_data.insert(
+                "windows-jp".to_string(),
+                egui::FontData::from_owned(bytes).into(),
+            );
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .insert(0, "windows-jp".to_string());
+            }
+            return;
+        }
+    }
+    eprintln!(
+        "日本語フォントを読み込めませんでした: {}",
+        fonts_dir.display()
+    );
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_fonts_render_japanese_in_both_families() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.fonts_mut(|fonts| {
+                for font in [
+                    egui::FontId::proportional(14.0),
+                    egui::FontId::monospace(14.0),
+                ] {
+                    let galley = fonts.layout_no_wrap(
+                        "ABCyt-dlp待機中ダウンロード検索設定日本語".to_string(),
+                        font,
+                        egui::Color32::WHITE,
+                    );
+                    let glyphs = &galley.rows[0].glyphs;
+                    let first = &glyphs[0];
+                    for glyph in glyphs {
+                        assert_eq!(glyph.font_face_ascent, first.font_face_ascent);
+                        assert_eq!(glyph.font_face_height, first.font_face_height);
+                        assert!(glyph.advance_width > 0.0);
+                    }
+                    // 異なる漢字が同じ代替グリフに置換されていないことも確認する。
+                    let end = glyphs.len();
+                    assert_ne!(glyphs[end - 1].uv_rect, glyphs[end - 2].uv_rect);
+                }
+            });
+        });
+    }
 }

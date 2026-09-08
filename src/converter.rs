@@ -356,7 +356,7 @@ fn convert_to_mp4(
         LOG_CONVERT_WITH_VIDEOTOOLBOX.to_string(),
     ));
     let mut result = run_ffmpeg_conversion(&ffmpeg, input, &temporary, true, event_tx, ctx)?;
-    if !result.status.success() {
+    if !result.status.success() && libx264_retry_available() {
         let _ = fs::remove_file(&temporary);
         let _ = event_tx.send(ConversionEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
         ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -384,6 +384,25 @@ fn convert_to_mp4(
 pub(crate) const LOG_CONVERT_WITH_VIDEOTOOLBOX: &str = "ffmpeg: h264_videotoolboxで変換します。";
 pub(crate) const LOG_RETRY_WITH_LIBX264: &str =
     "ffmpeg: VideoToolboxを利用できないためlibx264で再試行します。";
+
+// 変換に使う H.264 エンコーダ名。h264_videotoolbox は macOS 専用のため、
+// それ以外のプラットフォームでは libx264 を使用する。
+pub(crate) fn h264_encoder() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "h264_videotoolbox"
+    } else {
+        "libx264"
+    }
+}
+
+// VideoToolbox が失敗したときに libx264 で再試行できるか。
+// macOS の同梱 ffmpeg は libx264 を含まない LGPL ビルドのため再試行しない。
+// 対応環境が Apple Silicon 限定で VideoToolbox は常に利用できるため、
+// 再試行しても「Unknown encoder」で失敗し、原因を隠すだけになる。
+// Windows は公式ビルドの ffmpeg を取得するため libx264 を使用できる。
+pub(crate) fn libx264_retry_available() -> bool {
+    !cfg!(target_os = "macos")
+}
 
 // 既定フォーマット（H.264 MP4）へ変換する ffmpeg コマンドを組み立てる。
 // 変換ウィンドウとダウンロード後の変換で同じ設定を共有する。
@@ -513,7 +532,7 @@ fn unique_output_path(input: &Path, output_dir: &Path) -> PathBuf {
     let stem = input
         .file_stem()
         .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| input.as_os_str())
+        .unwrap_or(input.as_os_str())
         .to_string_lossy();
     let first = output_dir.join(format!("{stem}.mp4"));
     if !first.exists() {

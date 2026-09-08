@@ -168,10 +168,8 @@ fn render_log_contents(
             });
         });
 
-    if clear_clicked {
-        if let Ok(mut logs) = logs.lock() {
-            logs.clear();
-        }
+    if clear_clicked && let Ok(mut logs) = logs.lock() {
+        logs.clear();
     }
 
     if copy_clicked {

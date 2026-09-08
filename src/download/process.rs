@@ -7,7 +7,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use crate::converter::{
-    LOG_CONVERT_WITH_VIDEOTOOLBOX, LOG_RETRY_WITH_LIBX264, default_mp4_command, truncate_error,
+    LOG_CONVERT_WITH_VIDEOTOOLBOX, LOG_RETRY_WITH_LIBX264, default_mp4_command, h264_encoder,
+    libx264_retry_available, truncate_error,
 };
 use crate::paths::bin_dir;
 
@@ -51,7 +52,7 @@ fn run_pipe_to_ffmpeg(
         .arg("-i")
         .arg("pipe:0")
         .arg("-c:v")
-        .arg("h264_videotoolbox")
+        .arg(h264_encoder())
         .arg("-b:v")
         .arg("5M")
         .arg("-pix_fmt")
@@ -133,7 +134,7 @@ pub(super) fn run_pipe_to_ffmpeg_or_cancel(
 }
 
 // ダウンロード済みファイルを既定フォーマット（H.264 MP4）へ変換する。
-// VideoToolbox が使えない環境では libx264 で再試行する。
+// libx264 が使える環境（Windows）では、VideoToolbox が失敗したときに libx264 で再試行する。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_default_format_convert(
     ffmpeg: &Path,
@@ -147,7 +148,7 @@ pub(super) fn run_default_format_convert(
     let _ = tx.send(DownloadEvent::Log(
         LOG_CONVERT_WITH_VIDEOTOOLBOX.to_string(),
     ));
-    let (status, _) = run_convert_command(ffmpeg, input, output, true, tx, progress, tracker)?;
+    let (status, stderr) = run_convert_command(ffmpeg, input, output, true, tx, progress, tracker)?;
     if status.success() {
         return Ok(());
     }
@@ -155,13 +156,18 @@ pub(super) fn run_default_format_convert(
         return Err(CANCELLED_ERROR.to_string());
     }
 
-    let _ = fs::remove_file(output);
-    let _ = tx.send(DownloadEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
-    let (status, stderr) =
-        run_convert_command(ffmpeg, input, output, false, tx, progress, tracker)?;
-    if cancel_flag.load(Ordering::Relaxed) {
-        return Err(CANCELLED_ERROR.to_string());
-    }
+    // libx264 が使えない環境では再試行せず、VideoToolbox の失敗をそのまま報告する。
+    let (status, stderr) = if libx264_retry_available() {
+        let _ = fs::remove_file(output);
+        let _ = tx.send(DownloadEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
+        let retried = run_convert_command(ffmpeg, input, output, false, tx, progress, tracker)?;
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(CANCELLED_ERROR.to_string());
+        }
+        retried
+    } else {
+        (status, stderr)
+    };
     if !status.success() {
         let detail = stderr.trim();
         return Err(if detail.is_empty() {
@@ -317,7 +323,7 @@ fn spawn_capture_stream_thread<R: Read + Send + 'static>(
     }))
 }
 
-// 1 行ログを進捗解析し、その後 UI ログへ送る。
+// 1 行ログを進捗解析し、yt-dlp の生進捗だけを簡潔なログへ集約して UI へ送る。
 fn handle_stream_line(
     line: String,
     tx: &mpsc::Sender<DownloadEvent>,
@@ -328,10 +334,32 @@ fn handle_stream_line(
         return;
     }
 
+    let download_percent = yt_dlp_download_percent(trimmed);
     handle_progress_line(trimmed, progress, tx);
     guard::notify(trimmed, tx);
 
+    if let Some(percent) = download_percent {
+        if let Some(percent) = progress.next_log_percent(percent) {
+            let _ = tx.send(DownloadEvent::Log(format!("ダウンロード進捗: {percent}%")));
+        }
+        return;
+    }
+
     let _ = tx.send(DownloadEvent::Log(trimmed.to_string()));
+}
+
+// 保存先などの通知行は除外し、yt-dlp の `[download] xx.x%` 行だけを判定する。
+// ファイル名に `%` を含む通知行を進捗と誤認しないよう、タグ直後の数値だけを見る。
+fn yt_dlp_download_percent(line: &str) -> Option<f32> {
+    let rest = line.strip_prefix("[download]")?.trim_start();
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if digits.is_empty() || !rest[digits.len()..].starts_with('%') {
+        return None;
+    }
+    digits.parse::<f32>().ok()
 }
 
 // yt-dlp/ffmpeg ログから進捗パーセンテージや変換フェーズ遷移を検出する。
@@ -400,4 +428,30 @@ fn is_post_processing_line(line: &str) -> bool {
         || lower.contains("[fixup")
         || lower.contains("merging formats into")
         || lower.contains("post-process")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::yt_dlp_download_percent;
+
+    #[test]
+    fn recognizes_only_yt_dlp_percentage_progress_lines() {
+        assert_eq!(
+            yt_dlp_download_percent("[download]  34.5% of 85.87MiB"),
+            Some(34.5)
+        );
+        assert_eq!(
+            yt_dlp_download_percent("[download] Destination: 日本語.mp4"),
+            None
+        );
+        assert_eq!(
+            yt_dlp_download_percent("[Merger] Merging formats into 日本語.mp4"),
+            None
+        );
+        // ファイル名に `%` を含む通知行を進捗と誤認しない。
+        assert_eq!(
+            yt_dlp_download_percent("[download] Destination: 100% Orange Juice OP.mp4"),
+            None
+        );
+    }
 }

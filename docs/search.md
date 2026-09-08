@@ -18,7 +18,7 @@ cargo run
 
 ## テスト
 ```bash
-cargo test search_index::tests -- --test-threads=1
+cargo test search_index -- --test-threads=1
 ```
 
 ## 設計概要
@@ -60,7 +60,17 @@ cargo test search_index::tests -- --test-threads=1
 - ランキング強化（前方一致・最近利用・ルート重み）
 
 ## 実装主要ファイル
-- `/Users/kyopan/Documents/VJSoft/VJDownloader/src/search_index.rs`
-- `/Users/kyopan/Documents/VJSoft/VJDownloader/src/settings_ui.rs`
-- `/Users/kyopan/Documents/VJSoft/VJDownloader/src/settings.rs`
-- `/Users/kyopan/Documents/VJSoft/VJDownloader/src/app.rs`
+
+リポジトリルートからの相対パスで記載する。
+
+- `src/search_index/mod.rs`: インデックス本体（ワーカー起動・検索・再インデックス制御）
+- `src/search_index/db.rs`: SQLiteスキーマとクエリ実行
+- `src/search_index/normalize.rs`: NFKC + lower + ひらがな化の正規化
+- `src/search_index/query.rs`: 検索クエリの解析
+- `src/search_index/scanner.rs`: `walkdir`によるフルスキャン
+- `src/search_index/watcher.rs`: `notify`監視とデバウンス
+- `src/search_index/writer.rs`: 単一ライタースレッド
+- `src/settings/ui.rs`: 検索対象フォルダの追加・削除、全体を再インデックスのUI
+- `src/settings/mod.rs`: 設定ファイルの読み書き
+- `src/paths.rs`: DBファイルなど内部パスの解決
+- `src/app.rs`: アプリ本体との結線

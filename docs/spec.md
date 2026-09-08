@@ -2,10 +2,12 @@
 
 ## 概要
 
-- クリップボードのURLから動画をダウンロードし、ローカルのMP4を管理・送出するmacOS向けツール。
+- クリップボードのURLから動画をダウンロードし、ローカルのMP4を管理・送出するmacOS/Windows向けツール。
 - UIはダーク基調で、ダウンロード進捗と保存済みリストを表示する。
 - アプリ名は「VJDownloader」で表示される。
 - macOSアプリバンドルのアイコンは`assets/icon/App.icns`をそのまま同梱して使用する（ビルド時のアイコン生成は行わない）。
+- アプリアイコンはmacOSのアイコングリッドに従い、1024pxのキャンバスに対して本体を824px（80.5%）とし、
+  周囲に各辺100pxの透明な余白を持たせる。余白が不足するとDockやFinderで他アプリより大きく表示される。
 
 ## ウィンドウ
 
@@ -71,7 +73,13 @@
 - ダウンロードは別スレッドで実行する。
 - 起動時にバックグラウンドでyt-dlp/denoの有無を確認し、未導入ならGitHubの最新リリースから取得する。
 - yt-dlpをダウンロードした後、実行権限を付与する。
-- ffmpeg/ffprobeは同梱バイナリから`~/.vjdownloader/bin`へコピーし、実行権限を付与する。
+- macOSではffmpeg/ffprobeを同梱バイナリから`~/.vjdownloader/bin`へコピーし、実行権限を付与する。
+- macOSの同梱ffmpeg/ffprobeは外部ライブラリを含まない自前ビルド（LGPL-2.1-or-later、最小macOS 13.0、arm64）で、
+  ビルド手順は`scripts/build-ffmpeg-macos.sh`にある。
+- WindowsではmacOS用の同梱ffmpeg/ffprobeを配置しない。`ffmpeg.exe`/`ffprobe.exe`はアプリ用binフォルダ、PATHの順に探索し、Windows PE形式かつ`-version`を正常実行できるものだけを使用する。
+- Windowsで使用可能な`ffmpeg.exe`/`ffprobe.exe`が見つからない場合は、初回セットアップで公式ビルドを取得する。
+- ffmpeg/ffprobeの探索結果は、使用可能と確定した場合のみ記憶する。見つからなかった場合は記憶せず次回も探索し直し、
+  アプリ起動後にffmpegを導入した場合も再起動せずに復旧できるようにする。
 - denoが存在しない場合はGitHubの最新リリースから`deno-aarch64-apple-darwin.zip`をダウンロードし展開する。
 - yt-dlp/denoの取得と更新は「一時フォルダへダウンロード → 内容を検証 → 本体を置き換え → 前バージョンを削除」の順で行い、
   ダウンロード中も既存バイナリを残す。
@@ -81,7 +89,9 @@
 - 保存先フォルダが存在しない場合は作成する。
 - 出力テンプレートは`%(title)s.%(ext)s`を使用する。
 - yt-dlp実行時に`~/.vjdownloader/bin`をPATH先頭に追加する。
-- yt-dlpのstdout/stderrは行単位で読み取り、ログと進捗に反映する。
+- yt-dlpのstdout/stderrはUTF-8で行単位に読み取り、ログと進捗に反映する。
+- yt-dlpの生の進捗行はそのまま大量に表示せず、5%刻みの`ダウンロード進捗: n%`へ集約する。
+  集約対象は`[download]`タグの直後が数値と`%`である行に限り、ファイル名に`%`を含む通知行はそのままログへ出力する。
 - ダウンロード中にStopを押した場合は実行中のプロセスを終了してキャンセルする。
 
 ## 動画ファイルのMP4変換
@@ -90,8 +100,9 @@
 - 変換ウィンドウへWebM、MOV、MKVなどの動画ファイルをドラッグ＆ドロップすると、同梱ffmpegによるMP4変換を自動的に開始する。
 - 複数ファイルを同時にドロップした場合は、ドロップされたファイルを順番に変換する。
 - 変換中に追加のファイルがドロップされた場合は受け付けず、現在の変換が終わってから再度ドロップするよう案内する。
-- 映像は`h264_videotoolbox`、音声はAACへ変換し、`yuv420p`および`faststart`を指定する。VideoToolboxが利用できない環境では
-  `libx264`へ自動的にフォールバックする。
+- 映像は`h264_videotoolbox`（macOS）または`libx264`（Windows）、音声はAACへ変換し、`yuv420p`および`faststart`を指定する。
+- Windowsでは`h264_videotoolbox`での変換が失敗した場合に`libx264`へ自動的にフォールバックする。
+  macOSの同梱ffmpegは`libx264`を含まないLGPLビルドのためフォールバックせず、失敗をそのまま報告する。
 - 変換中の一時ファイルはダウンロード一覧に現れない隠しファイル名とし、成功後に最終的な`.mp4`名へ変更する。
 - 変換済みファイルは設定済みの出力先フォルダへ保存し、同名ファイルがある場合は`-converted`と連番を付けて上書きを避ける。
 - 変換完了後はメイン画面のダウンロードリストを即時更新し、変換したMP4を表示する。
@@ -112,6 +123,8 @@
 ## ダウンロードオプション（共通）
 
 - `--no-playlist`を指定する。
+- Windowsを含めて日本語の動画名・パスを正しくログ表示するため、`--encoding utf-8`を指定する。
+- 進捗出力を安定して行単位で取得し、更新頻度を抑えるため、`--newline`と`--progress-delta 1`を指定する。
 - `--extractor-args youtube:player_client=web`を指定する。
 - `--extractor-args youtube:skip=translated_subs`を指定する。
 - `--concurrent-fragments 4`を指定する。
@@ -131,14 +144,15 @@
 
 - `-f bv*[height<=N]+ba/b[height<=N]`を指定する。Nは`標準`で720、`1080p上限`で1080。
 - `--recode-video mp4`を指定する。
-- `--postprocessor-args VideoConvertor:-c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p`を指定する。
+- `--postprocessor-args VideoConvertor:-c:v <H.264エンコーダ> -b:v 5M -pix_fmt yuv420p`を指定する。
 
 ## ダウンロードオプション（最高画質 + 変換）
 
 - `-f bv*+ba/b`を指定し、コーデックの絞り込み（`-S`/`--match-filter`）は行わない。
 - 取得したコーデックでも結合できるよう`--merge-output-format mkv`を指定する。
 - ダウンロード完了後、一時フォルダ内の動画ファイルを同梱ffmpegで既定フォーマット（H.264 MP4）へ変換する。
-  変換設定は変換ウィンドウと共通で、`h264_videotoolbox`（失敗時は`libx264`）・`-b:v 5M`・`yuv420p`・AAC 192k・`faststart`を使用する。
+  変換設定は変換ウィンドウと共通で、`h264_videotoolbox`（Windowsは失敗時に`libx264`へフォールバック）・`-b:v 5M`・
+  `yuv420p`・AAC 192k・`faststart`を使用する。
 - 変換中の出力は一時フォルダ内の隠しファイル（`.<元のファイル名>.converting`）とし、成功後に`<元のファイル名の拡張子なし>.mp4`へ確定して変換元を削除する。
 - 変換フェーズでは進捗表示を`変換中...`に切り替え、ffmpegのログをステータスログへ出力する。
 - 変換に失敗した場合はダウンロード失敗として扱い、一時ファイルを削除する。
@@ -160,13 +174,14 @@
 - 直リンク経路のダウンロード進捗は、同じGETレスポンスの`Content-Length`と転送量から算出し、受信中に`n%`を表示する。
   `Content-Length`がない場合は受信済みMBを表示する。
 - ダウンロード進捗は進捗バーだけでなくログにも`ダウンロード進捗: n%`として出力する。
-- ffmpeg変換は`h264_videotoolbox`を必須とし、利用できない場合は処理を中断する。
+- ffmpeg変換はH.264エンコーダを必須とし、ffmpegの`-encoders`に存在しない場合は処理を中断する。
+  macOSではさらにApple Silicon（aarch64）であることを必須とする。
 - ffmpeg変換ログは整形せずデフォルト出力をそのままステータスログへ出力する。
 - 直リンク取得に失敗した場合、または直リンク経路の`curl`/`ffmpeg`処理が失敗した場合は
-  `yt-dlp --no-playlist --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`
+  `yt-dlp --no-playlist --encoding utf-8 --newline --progress-delta 1 --concurrent-fragments 4 -f "bv+ba/b" --ffmpeg-location <ffmpeg> -o - <ページURL>`
   の出力をffmpegへパイプする。
 - ffmpegは
-  `-stats -analyzeduration 100M -probesize 100M -c:v h264_videotoolbox -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`
+  `-stats -analyzeduration 100M -probesize 100M -c:v <H.264エンコーダ> -b:v 5M -pix_fmt yuv420p -c:a aac -b:a 192k -ignore_unknown -movflags +faststart -f mp4 -y <出力パス>`
   を基本とし、直リンク経路・yt-dlpフォールバック経路ともに`-f webm -i pipe:0`を使用する。
 
 ## ストリーム再生
@@ -188,7 +203,7 @@
 - AnimeThemes URLはyt-dlpを使用せず、AnimeThemes
   API（失敗時はHTML解析）からWebM直リンクを取得してffmpegへ直接渡す。並行キャッシュは作成せず、シーク・ループ時も同じ直リンクを利用する。
 - 再生開始時にyt-dlpで総再生時間と直リンク（映像/音声URL）を取得する。
-- yt-dlpは`--no-playlist`・`youtube:player_client=web`・`youtube:skip=translated_subs`・`--js-runtimes <deno>`・
+- yt-dlpは`--no-playlist`・`--encoding utf-8`・`youtube:player_client=web`・`youtube:skip=translated_subs`・`--js-runtimes <deno>`・
   `-f bv*[height<=480]+ba/b[height<=480]/b`・`--print "DURATION:%(duration)s"`・`-g`で実行し、標準出力から`DURATION:`行と
   `http(s)`のURL行を解析する。
 - yt-dlp実行時は`~/.vjdownloader/bin`をPATH先頭に追加する。
@@ -282,22 +297,25 @@
 - 一覧は最終更新日時の降順で並べる。
 - 一覧の表示高は360pxで固定する。
 - リストが空の場合は`まだダウンロードがありません。`を表示する。
-- 行右端の`✕`ボタンで削除できる。
+- 行右端の×印ボタンで削除できる。×印はフォントに依存しない線画として表示する。
 - ファイル名は左寄せで表示する。
+- ファイル名は12pt、字間-1ptで表示し、狭いウィンドウでも表示文字数を確保する。
+- ただし空白（半角・全角・連続を含む）の字間は+1ptとし、字間を詰めても単語の区切りが読み取れるようにする。
 - ファイル名の上下パディングは等間隔に揃える。
 - ファイル名が長い場合は末尾を`...`で省略する。
 
 ## Drag & Drop
 
-- リスト項目のドラッグでmacOSネイティブのファイルドラッグを開始する。
-- Finderと同様に、ドラッグ中はファイルアイコンが表示される。
+- リスト項目のドラッグでOSネイティブのファイルドラッグを開始する。
+- ドラッグ中はファイルアイコンが表示される。
 - ドロップ先へはファイル参照が渡る。
 - ファイル名を含むホバーでハイライトされる範囲全体がドラッグ対象。
 - ホバー時はマウスカーソルをポインタ表示に変更する。
 - 単クリックではドラッグを開始しない。
 - ドラッグは押下したまま移動したときに開始する。
 - ドラッグ開始時はファイルパスを正規化し、失敗時はステータスにエラーを表示する。
-- ドラッグ用アイコンはFinder同様にmacOSのファイルアイコンを使用し、過大表示しないサイズで表示する。
+- ドラッグ用アイコンは、macOSではシステムの書類アイコン、Windowsでは実行ファイルへ埋め込んだ32px PNG（`assets/icon/drag_32x32.png`）を使用し、実行時の作業ディレクトリに依存しない。macOSでシステムアイコンが見つからない場合も埋め込みPNGへフォールバックする。
+- ドラッグ用アイコンはアプリアイコンとは別画像とする。Dock向けの余白はドラッグ画像には不要なため、余白を持たない画像を使用する。
 
 ## カーソル挙動
 
@@ -315,8 +333,10 @@
 - `直近10分をコピー`ボタンで直近10分のログをクリップボードへコピーする。
 - ダウンロード成功時は`Download completed. Total time: <mm:ss or h:mm:ss>`をログ出力する。
 - ログはアプリ終了時にクリアされる（永続化しない）。
-- macOSでは入力ソース変更を監視し、日本語入力に切り替わった場合は`日本語になりました`、英字入力（ABC）に切り替わった場合は
-  `英字になりました`をログ出力する。
+- 入力ソース変更を監視し、日本語入力に切り替わった場合は`日本語になりました`、英字入力に切り替わった場合は
+  `英字になりました`をログ出力する。それ以外の入力ソースへ切り替わった場合は`入力ソースが変更されました: <名称>`を出力する。
+- 入力ソースの判定はmacOSでは入力ソースID（`ABC`を英字とみなす）、WindowsではキーボードレイアウトのLANGIDと
+  IMEの変換モード（`IME_CMODE_NATIVE`の有無）で行う。
 
 ## UIテキスト
 
@@ -338,6 +358,22 @@
 - 設定画面とメインアプリの間はチャンネルで操作と結果を受け渡し、描画中の設定状態をメインアプリからロックしない。
 - 設定ウィンドウの表示状態はAtomicBoolで管理し、ロック失敗を理由とする高頻度の再描画要求は行わない。
 
+## Windowsの初回セットアップ
+
+- yt-dlpとDenoはWindowsの対象CPU（x64/ARM64）向け公式バイナリを取得し、`.exe`名で検証・保存・検出する。
+- DenoのZIPはWindows PowerShellから呼び出す.NETの`ZipFile::ExtractToDirectory`で展開する。パスは環境変数で渡し、空白・日本語・記号を含むパスを保護する。
+- macOSの取得先と展開方式は維持する。
+- ffmpeg/ffprobeはBtbN/FFmpeg-Buildsの静的ビルドZIP（`latest`タグ）を対象CPU別に取得する。
+  x64は`ffmpeg-master-latest-win64-gpl.zip`、ARM64は`ffmpeg-master-latest-winarm64-gpl.zip`を使用する。
+- ZIPには`ffmpeg.exe`と`ffprobe.exe`の両方が含まれるため、ダウンロードは1回にまとめる。
+  実行ファイルは`<展開名>/bin/`配下に置かれるため、展開先を再帰的に探索して取り出す。
+- 配置先はアプリ用binフォルダに固定し、PATH上のffmpegは書き換えない。
+- 取得手順はyt-dlp/denoと同じく「一時フォルダへダウンロード → 内容を検証 → 本体を置き換え → 前バージョンを削除」とする。
+  片方だけが新しい状態にならないよう、ffmpegとffprobeの両方の検証が終わってから置き換える。
+- 取得はUIを止めないよう、起動時のバックグラウンド処理で行う。ダウンロード開始時に未導入だった場合はその時点でも取得を試み、
+  進捗をステータスログへ出力する。起動時取得とダウンロード開始時取得は排他制御し、二重取得を防ぐ。
+- 起動時の取得に失敗した場合はステータスログへ理由を出力する。
+
 ## テーマとフォント
 
 - ダークテーマを適用する。
@@ -346,6 +382,7 @@
 - ボタンやパネルは角丸を使用する。
 - フォントはSF系フォントを優先し、無い場合はAvenir系を使用する。
 - 日本語フォントはHiragino Sans等のシステムフォントから順に使用する。
+- Windowsでは`SystemRoot`（未設定時は`WINDIR`、さらに未設定なら`C:\Windows`）配下のFontsから游ゴシック、メイリオ、MS ゴシックの順に読み込み、比例・等幅フォント双方の先頭に登録し、英字と日本語を同じフォントで描画してベースラインを揃える。macOSのフォント選択は変更しない。
 
 ## エラーハンドリング
 
@@ -418,6 +455,34 @@
 - SQLite書き込みは単一ライタースレッド（キュー経由）に集約する。
 - 検索は別スレッドで実行し、入力連打時は最新クエリを優先して古い要求を破棄する。
 - DBはWALモードを使用し、検索と更新の並行実行時の待ちを低減する。
+
+## プラットフォーム依存実装の分離
+
+- Syphon出力はmacOSかつ`syphon`フィーチャー有効時のみ組み込み、Windowsでは通常のプレビュー処理を使用する。
+- 変換に使うH.264エンコーダはプラットフォームで切り替える。macOSは`h264_videotoolbox`、Windowsは`libx264`を使用する。
+  ダウンロード後の変換・yt-dlpの`VideoConvertor`・パイプ変換・AnimeThemes変換のすべてでこの選択結果を共有する。
+- `h264_videotoolbox`が失敗したときの`libx264`での再試行はWindowsのみ行う。macOSの同梱ffmpegは外部ライブラリを
+  含まないLGPLビルドで`libx264`を持たないため、再試行しても原因を隠すだけになる。
+- Windowsの入力ソース判定は、前面ウィンドウが自プロセスの場合のみ行う。IMM32は他プロセスのウィンドウへ入力コンテキストを
+  返さないため、他アプリが前面の間は「変化なし」として扱い、フォーカス切り替えでログを出さない。
+- リリースビルドはWindowsサブシステムとしてビルドし、GUIの横にコンソールウィンドウを出さない。デバッグビルドはコンソールを残す。
+- 実行権限ビットの検査・付与はUnix環境のみで行う。Windowsでは通常ファイルの存在を確認し、外部ツールの起動可否は既存の実行時検証で確認する。
+- 対応プラットフォームはmacOSとWindowsの2つとし、それ以外のターゲットは`compile_error!`でビルドを止める。
+- OS固有APIの呼び出しは`src/platform/`配下にのみ置き、それ以外のモジュール（`download/`、`stream/`、`search_index/`、`ui`など）はプラットフォーム差分を持たない。
+- `src/platform/`は次の3つに分割する。
+    - `common/`: 両プラットフォーム実装が共有する型のみを置く。業務ロジックは置かない。
+    - `macos/`: macOS実装（AppKit / Carbon）。
+    - `windows/`: Windows実装。
+- 実装の切り替えは`src/platform/mod.rs`の`#[cfg_attr(target_os = ..., path = ...)]`で行い、対象外のディレクトリはコンパイル対象から除外する。
+- 公開APIは`src/platform/mod.rs`でドメインごとに明示的に再エクスポートする。これにより両実装のAPI一致が強制され、片方への実装漏れはコンパイルエラーとなる。
+- Windows実装のうち、フォルダ選択（`IFileOpenDialog`）とIME判定（`GetKeyboardLayout` + IMM32）は実装済みである。
+- Windowsではメイン画面を右クリックすると、設定・ログ・通信速度測定・ストリーム再生・動画をMP4に変換のメニューを表示する。メニュー項目はダーク背景上で判読しやすい明るい文字色で表示する。選択すると対応するサブ画面を開き、メニューを閉じる。メニュー外クリックやEscでも閉じられる。macOSのネイティブメニューは変更しない。
+- サブ画面を開く要求は、macOSではネイティブメニュー、Windowsではアプリ内UIからフラグとして渡し、UIループが回収する。この受け渡し方式は両プラットフォームで共通とする。
+- 残作業は各ファイルの`TODO(windows)`に記載する。
+- `cargo check`は実行中のOS側のみを検証する。もう一方のターゲットの検証はCIまたは実機で行う。
+- CIはmacOS（arm64）とWindows（x64）の両方をビルドする。配布物はmacOSが`.app`入りのDMG、Windowsが`.exe`とライセンス文書を入れたZIP。
+- リリースには、バージョン付きの配布物（`VJDownloader-<version>-macos-arm64.dmg` / `VJDownloader-<version>-windows-x64.zip`）と、内容が同一でバージョンを含まない別名（`VJDownloader-macos-arm64.dmg` / `VJDownloader-windows-x64.zip`）の両方を添付する。別名は`releases/latest/download/<固定名>`でREADMEから最新版へ直リンクするために必要で、バージョン付きは過去版の識別用に残す。
+- Windowsのビルドは`syphon`フィーチャーを無効化する（Syphon出力はmacOS限定のため）。
 
 ## 実装デフォルト値と変更方法
 

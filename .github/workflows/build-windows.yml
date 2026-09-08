@@ -1,0 +1,64 @@
+name: Build Windows (自動ビルド)
+
+on:
+  # main ブランチへの push で自動ビルド
+  push:
+    branches: [ "main" ]
+  # GitHub 画面から手動実行
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 対応アーキテクチャは x64 のみ。ARM64 向けバイナリは配布しない
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code (ソース取得)
+        uses: actions/checkout@v6.0.2
+
+      # Rust ツールチェーンをセットアップ
+      - name: Set up Rust (Rust環境準備)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # Cargo のビルドキャッシュを利用して高速化
+      - name: Cache Cargo build (キャッシュ復元)
+        uses: Swatinem/rust-cache@v2
+
+      # Cargo.toml の version を取り出し、後続ステップで再利用
+      - name: Extract version from Cargo.toml (バージョン取得)
+        shell: pwsh
+        run: |
+          $line = Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1
+          $appVersion = $line.Matches[0].Groups[1].Value
+          "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Detected version: $appVersion"
+
+      # syphon は macOS 限定のため Windows では既定フィーチャーを無効化する
+      - name: Build release binary (リリースビルド)
+        shell: pwsh
+        run: cargo build --release --locked --no-default-features --target x86_64-pc-windows-msvc
+
+      # exe 単体では配布時にライセンス表示が付かないため ZIP へまとめる。
+      # Windows は ffmpeg を同梱せず実行時に取得するため LGPL 文書は含めない
+      - name: Create ZIP artifact (配布用ZIP作成)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = "dist/VJDownloader-$env:APP_VERSION-windows-x64"
+          $zipPath = "dist/VJDownloader-$env:APP_VERSION-windows-x64.zip"
+          Remove-Item -Recurse -Force "dist" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/VJDownloader.exe" "$stage/VJDownloader.exe"
+          Copy-Item "LICENSE" "$stage/LICENSE.txt"
+          Copy-Item "THIRD_PARTY_NOTICES.md" "$stage/THIRD_PARTY_NOTICES.md"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zipPath -Force
+          "ZIP_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ZIP を成果物としてアップロード
+      - name: Upload build artifact (成果物アップロード)
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: VJDownloader-${{ env.APP_VERSION }}-windows-x64
+          path: ${{ env.ZIP_PATH }}

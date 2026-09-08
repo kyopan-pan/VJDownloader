@@ -203,17 +203,17 @@ fn syphon_framework_candidates() -> Vec<PathBuf> {
     if let Ok(dir) = env::var("SYPHON_FRAMEWORK_DIR") {
         candidates.push(PathBuf::from(dir).join("Syphon.framework").join("Syphon"));
     }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(mac_os_dir) = exe.parent() {
-            candidates.push(
-                mac_os_dir
-                    .join("..")
-                    .join("Frameworks")
-                    .join("Syphon.framework")
-                    .join("Syphon"),
-            );
-            candidates.push(mac_os_dir.join("Syphon.framework").join("Syphon"));
-        }
+    if let Ok(exe) = env::current_exe()
+        && let Some(mac_os_dir) = exe.parent()
+    {
+        candidates.push(
+            mac_os_dir
+                .join("..")
+                .join("Frameworks")
+                .join("Syphon.framework")
+                .join("Syphon"),
+        );
+        candidates.push(mac_os_dir.join("Syphon.framework").join("Syphon"));
     }
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

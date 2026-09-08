@@ -366,10 +366,10 @@ pub fn render_toolbar(
     if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
         app.settings_ui.open_settings();
     }
-    if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::L)) {
-        if let Ok(mut state) = app.log_ui.lock() {
-            state.open_logs();
-        }
+    if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::L))
+        && let Ok(mut state) = app.log_ui.lock()
+    {
+        state.open_logs();
     }
 }
 
@@ -1017,11 +1017,11 @@ fn render_search_roots_section(ui: &mut egui::Ui, state: &mut SettingsUiState) -
         }
     }
 
-    if let Some(index) = remove_index {
-        if index < state.form.data.search_roots.len() {
-            state.form.data.search_roots.remove(index);
-            changed = true;
-        }
+    if let Some(index) = remove_index
+        && index < state.form.data.search_roots.len()
+    {
+        state.form.data.search_roots.remove(index);
+        changed = true;
     }
 
     (should_reindex, changed)

@@ -59,10 +59,10 @@ impl AppLogger {
         let cutoff = Instant::now().checked_sub(duration);
         let mut out = String::new();
         for entry in &self.entries {
-            if let Some(cutoff) = cutoff {
-                if entry.at < cutoff {
-                    continue;
-                }
+            if let Some(cutoff) = cutoff
+                && entry.at < cutoff
+            {
+                continue;
             }
             if !out.is_empty() {
                 out.push('\n');

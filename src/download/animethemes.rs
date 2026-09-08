@@ -9,6 +9,8 @@ use std::thread;
 use std::time::Duration;
 use url::Url;
 
+use crate::converter::h264_encoder;
+
 use super::process::{run_pipe_to_ffmpeg_or_cancel, spawn_stream_thread, terminate_child_process};
 use super::{CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressContext, ProgressUpdate};
 
@@ -37,7 +39,7 @@ pub(super) fn run_animethemes_pipeline(
     if cancel_flag.load(Ordering::Relaxed) {
         return Err(CANCELLED_ERROR.to_string());
     }
-    ensure_apple_silicon_gpu_encoder(ffmpeg)?;
+    ensure_conversion_encoder(ffmpeg)?;
     let output_path = build_animethemes_output_path(url, output_dir);
 
     let direct_url = fetch_animethemes_direct_webm(url, tx)?;
@@ -110,6 +112,11 @@ fn run_animethemes_yt_dlp_fallback(
 ) -> Result<(), String> {
     let mut cmd = Command::new(yt_dlp);
     cmd.arg("--no-playlist")
+        .arg("--encoding")
+        .arg("utf-8")
+        .arg("--newline")
+        .arg("--progress-delta")
+        .arg("1")
         .arg("--concurrent-fragments")
         .arg("4")
         .arg("-f")
@@ -224,9 +231,10 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
         ));
     }
 
-    let _ = tx.send(DownloadEvent::Log(
-        "ffmpeg(GPU: h264_videotoolbox)でストリーミング変換を開始します。".to_string(),
-    ));
+    let _ = tx.send(DownloadEvent::Log(format!(
+        "ffmpeg({})でストリーミング変換を開始します。",
+        h264_encoder()
+    )));
 
     let mut ffmpeg_cmd = Command::new(ffmpeg);
     ffmpeg_cmd
@@ -240,7 +248,7 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
         .arg("-i")
         .arg("pipe:0")
         .arg("-c:v")
-        .arg("h264_videotoolbox")
+        .arg(h264_encoder())
         .arg("-b:v")
         .arg("5M")
         .arg("-pix_fmt")
@@ -441,18 +449,17 @@ fn handle_ffmpeg_conversion_line(
         return;
     }
 
-    if let Some(total) = total_seconds {
-        if total > 0.0 {
-            if let Some(current) = parse_ffmpeg_time_seconds(trimmed) {
-                let percent = ((current / total) * 100.0).clamp(0.0, 100.0) as f32;
-                if percent >= *last_percent + 0.2 || percent >= 99.9 {
-                    *last_percent = percent;
-                    let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::converting(
-                        percent,
-                        &progress.elapsed(),
-                    )));
-                }
-            }
+    if let Some(total) = total_seconds
+        && total > 0.0
+        && let Some(current) = parse_ffmpeg_time_seconds(trimmed)
+    {
+        let percent = ((current / total) * 100.0).clamp(0.0, 100.0) as f32;
+        if percent >= *last_percent + 0.2 || percent >= 99.9 {
+            *last_percent = percent;
+            let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::converting(
+                percent,
+                &progress.elapsed(),
+            )));
         }
     }
 
@@ -477,9 +484,11 @@ fn parse_hhmmss_to_seconds(value: &str) -> Option<f64> {
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
-// Apple Silicon + h264_videotoolbox 前提を満たしているかを検証する。
-fn ensure_apple_silicon_gpu_encoder(ffmpeg: &Path) -> Result<(), String> {
-    if std::env::consts::ARCH != "aarch64" {
+// 変換に使うエンコーダをffmpegが備えているかを検証する。
+// macOSはApple Silicon + h264_videotoolboxを前提とし、他OSはlibx264を確認する。
+fn ensure_conversion_encoder(ffmpeg: &Path) -> Result<(), String> {
+    let encoder = h264_encoder();
+    if cfg!(target_os = "macos") && std::env::consts::ARCH != "aarch64" {
         return Err(
             "Apple Silicon環境のみ対応です。h264_videotoolbox(GPU)が必須です。".to_string(),
         );
@@ -499,11 +508,10 @@ fn ensure_apple_silicon_gpu_encoder(ffmpeg: &Path) -> Result<(), String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let joined = format!("{stdout}\n{stderr}");
-    if !joined.contains("h264_videotoolbox") {
-        return Err(
-            "ffmpegにh264_videotoolboxがありません。Apple Silicon GPU変換を継続できません。"
-                .to_string(),
-        );
+    if !joined.contains(encoder) {
+        return Err(format!(
+            "ffmpegに{encoder}がありません。動画変換を継続できません。"
+        ));
     }
     Ok(())
 }
@@ -912,10 +920,10 @@ fn requested_theme_version(page_theme_slug: &str) -> Option<i64> {
 fn theme_matches_slug(theme: &Value, theme_slug: &str) -> bool {
     let attributes = theme.get("attributes").unwrap_or(theme);
 
-    if let Some(slug) = attributes.get("slug").and_then(Value::as_str) {
-        if is_matching_theme_identifier(theme_slug, slug) {
-            return true;
-        }
+    if let Some(slug) = attributes.get("slug").and_then(Value::as_str)
+        && is_matching_theme_identifier(theme_slug, slug)
+    {
+        return true;
     }
 
     let Some(theme_type) = attributes.get("type").and_then(Value::as_str) else {
@@ -1030,10 +1038,10 @@ fn build_animethemes_output_path(url: &str, output_dir: &Path) -> PathBuf {
         }
     }
 
-    if picked.is_empty() {
-        if let Some(last) = segments.last() {
-            picked.push(last.clone());
-        }
+    if picked.is_empty()
+        && let Some(last) = segments.last()
+    {
+        picked.push(last.clone());
     }
 
     let base = picked.join("-");

@@ -1,0 +1,10 @@
+# テキストファイルはLFに統一
+* text=auto eol=lf
+
+# Windows用スクリプトはCRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# バイナリアセットは属性変換とdiffの対象外にする
+assets/bin/** binary
+*.icns binary

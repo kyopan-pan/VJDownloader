@@ -86,26 +86,6 @@ pub(super) fn is_supported_video_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{is_supported_video_path, normalize_for_search};
-    use std::path::Path;
-
-    #[test]
-    fn recognizes_supported_video_extensions_case_insensitively() {
-        for path in ["a.mp4", "a.MOV", "a.m4v", "a.WebM", "a.MKV"] {
-            assert!(is_supported_video_path(Path::new(path)), "{path}");
-        }
-        assert!(!is_supported_video_path(Path::new("a.avi")));
-        assert!(!is_supported_video_path(Path::new("a.txt")));
-    }
-
-    #[test]
-    fn normalizes_full_width_and_half_width_katakana_to_hiragana() {
-        assert_eq!(normalize_for_search(" ウザ ｳｻﾞ ヽヾ "), "うざ うざ ゝゞ");
-    }
-}
-
 // SystemTime を UNIX 秒へ変換する。
 pub(super) fn system_time_to_epoch_secs(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
@@ -124,4 +104,24 @@ pub(super) fn epoch_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_supported_video_path, normalize_for_search};
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_supported_video_extensions_case_insensitively() {
+        for path in ["a.mp4", "a.MOV", "a.m4v", "a.WebM", "a.MKV"] {
+            assert!(is_supported_video_path(Path::new(path)), "{path}");
+        }
+        assert!(!is_supported_video_path(Path::new("a.avi")));
+        assert!(!is_supported_video_path(Path::new("a.txt")));
+    }
+
+    #[test]
+    fn normalizes_full_width_and_half_width_katakana_to_hiragana() {
+        assert_eq!(normalize_for_search(" ウザ ｳｻﾞ ヽヾ "), "うざ うざ ゝゞ");
+    }
 }
