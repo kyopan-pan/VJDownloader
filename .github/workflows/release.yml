@@ -1,0 +1,190 @@
+name: Release (タグでリリース公開)
+
+on:
+  # バージョンタグの push でリリースを公開する
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*.[0-9]*.[0-9]*"
+  # GitHub 画面から手動実行（この場合はリリースを作らず成果物のみ）
+  workflow_dispatch:
+
+# gh release create でリリースを作成するため書き込み権限が必要
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # 生成物の実行可能範囲を広く取るため、利用可能な最も古い arm64 ランナーでビルドする
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout code (ソース取得)
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Rust (Rust環境準備)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build (キャッシュ復元)
+        uses: Swatinem/rust-cache@v2
+
+      # タグと Cargo.toml の version がずれたまま公開しないよう突き合わせる
+      - name: Resolve version (バージョン確定)
+        run: |
+          set -euo pipefail
+          APP_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          echo "APP_VERSION=${APP_VERSION}" >> "${GITHUB_ENV}"
+          echo "Cargo.toml version: ${APP_VERSION}"
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [ "${TAG_VERSION}" != "${APP_VERSION}" ]; then
+              echo "タグ (${GITHUB_REF_NAME}) と Cargo.toml の version (${APP_VERSION}) が一致しません" >&2
+              exit 1
+            fi
+          fi
+
+      # 公式 Syphon.framework を full Xcode でビルドして third_party/ へ配置
+      - name: Build Syphon.framework (Syphon同梱用ビルド)
+        run: |
+          set -euo pipefail
+          rm -rf syphon-src
+          git clone --depth 1 https://github.com/Syphon/Syphon-Framework.git syphon-src
+          cd syphon-src
+          xcodebuild \
+            -project Syphon.xcodeproj \
+            -target Syphon \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            SYMROOT="$PWD/build" \
+            build
+          # build/EagerLinkingTBDs 配下にも同名の .tbd スタブができるため Release を直接指定
+          FW="$PWD/build/Release/Syphon.framework"
+          if [ ! -f "${FW}/Versions/A/Resources/Info.plist" ] || [ ! -f "${FW}/Versions/A/Syphon" ]; then
+            echo "Syphon.framework のビルド成果物が不完全です: ${FW}" >&2
+            ls -lR "${FW}" >&2 || true
+            exit 1
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/third_party"
+          rm -rf "${GITHUB_WORKSPACE}/third_party/Syphon.framework"
+          cp -R "${FW}" "${GITHUB_WORKSPACE}/third_party/"
+
+      - name: Build release binary (リリースビルド)
+        env:
+          SYPHON_FRAMEWORK_DIR: ${{ github.workspace }}/third_party
+        run: cargo build --release --locked --features syphon
+
+      - name: Create .app bundle (macOSアプリ化)
+        run: |
+          set -euo pipefail
+          APP_DIR="dist/VJDownloader.app"
+          mkdir -p "${APP_DIR}/Contents/MacOS"
+          mkdir -p "${APP_DIR}/Contents/Resources"
+          mkdir -p "${APP_DIR}/Contents/Frameworks"
+          cp target/release/VJDownloader "${APP_DIR}/Contents/MacOS/VJDownloader"
+          cp assets/icon/App.icns "${APP_DIR}/Contents/Resources/App.icns"
+          chmod +x "${APP_DIR}/Contents/MacOS/VJDownloader"
+          # Syphon.framework を同梱（バイナリの rpath: @executable_path/../Frameworks から解決）
+          cp -R third_party/Syphon.framework "${APP_DIR}/Contents/Frameworks/"
+          # LGPL版FFmpegを埋め込んでいるため、ライセンス表示を配布物に必ず同伴させる
+          cp LICENSE "${APP_DIR}/Contents/Resources/LICENSE.txt"
+          cp THIRD_PARTY_NOTICES.md "${APP_DIR}/Contents/Resources/THIRD_PARTY_NOTICES.md"
+          cp licenses/LGPL-2.1.txt "${APP_DIR}/Contents/Resources/LGPL-2.1.txt"
+
+          cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>ja</string>
+            <key>CFBundleDisplayName</key>
+            <string>VJDownloader</string>
+            <key>CFBundleExecutable</key>
+            <string>VJDownloader</string>
+            <key>CFBundleIconFile</key>
+            <string>App.icns</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.kyopan.vjdownloader</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>VJDownloader</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${{ env.APP_VERSION }}</string>
+            <key>CFBundleVersion</key>
+            <string>${{ github.run_number }}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>13.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+      # 公証なし運用でも「壊れている」判定を避けるため ad-hoc 署名を付与
+      - name: Ad-hoc sign .app (Gatekeeper対策)
+        run: |
+          set -euo pipefail
+          xattr -cr "dist/VJDownloader.app"
+          codesign --force --deep --sign - "dist/VJDownloader.app"
+          codesign --verify --deep --strict --verbose=2 "dist/VJDownloader.app"
+
+      - name: Create DMG artifact (create-dmg)
+        run: |
+          set -euo pipefail
+          if ! command -v create-dmg >/dev/null 2>&1; then
+            brew install create-dmg
+          fi
+
+          DMG_SRC="dist/dmg-src"
+          DMG_PATH="dist/VJDownloader-${APP_VERSION}-macos-arm64.dmg"
+          echo "DMG_PATH=${DMG_PATH}" >> "${GITHUB_ENV}"
+
+          rm -rf "${DMG_SRC}" "${DMG_PATH}"
+          mkdir -p "${DMG_SRC}"
+          cp -R "dist/VJDownloader.app" "${DMG_SRC}/VJDownloader.app"
+
+          create-dmg \
+            --format UDZO \
+            --volname "VJDownloader" \
+            --window-size 820 520 \
+            --icon-size 160 \
+            --icon "VJDownloader.app" 220 250 \
+            --hide-extension "VJDownloader.app" \
+            --app-drop-link 600 250 \
+            "${DMG_PATH}" \
+            "${DMG_SRC}"
+
+      # 手動実行時の確認用。タグ push 時もリリース添付とは別に成果物として残す
+      - name: Upload build artifact (成果物アップロード)
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: VJDownloader-${{ env.APP_VERSION }}-macos-arm64
+          path: ${{ env.DMG_PATH }}
+
+      # タグ push のときだけリリースを公開する
+      - name: Publish GitHub Release (リリース公開)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # プレリリース識別子（1.0.0-rc.1 など）を含むタグはプレリリース扱いにする
+          PRERELEASE_FLAG=""
+          case "${GITHUB_REF_NAME}" in
+            *-*) PRERELEASE_FLAG="--prerelease" ;;
+          esac
+
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" \
+              "${DMG_PATH}" LICENSE THIRD_PARTY_NOTICES.md licenses/LGPL-2.1.txt --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "VJDownloader ${APP_VERSION}" \
+              --generate-notes \
+              ${PRERELEASE_FLAG} \
+              "${DMG_PATH}" LICENSE THIRD_PARTY_NOTICES.md licenses/LGPL-2.1.txt
+          fi
