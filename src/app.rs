@@ -750,5 +750,7 @@ fn drag_preview_image() -> Image {
 
     // Windowsでは実行時の作業ディレクトリに依存しないよう、PNGを実行ファイルへ埋め込む。
     // macOSでもシステムの書類アイコンが見つからない場合は同じ画像を使用する。
-    Image::Raw(include_bytes!("../assets/icon/App.iconset/icon_32x32.png").to_vec())
+    // App.iconset ではなく専用の画像を使う。アプリアイコンはDockでの見た目を
+    // 他アプリと揃えるため周囲に余白を持つが、ドラッグ画像に余白は不要なため。
+    Image::Raw(include_bytes!("../assets/icon/drag_32x32.png").to_vec())
 }
