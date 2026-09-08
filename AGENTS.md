@@ -54,7 +54,7 @@ cargo run                        # 起動（macOS）
 
 ### 禁止事項
 
-- `assets/bin/ffmpeg` / `assets/bin/ffprobe` の変更・再生成。macOS向け同梱バイナリで、`src/bundled.rs` が `include_bytes!` で埋め込む。`.gitattributes` で binary 指定しており、改行変換が入ると壊れる。
+- `assets/bin/ffmpeg` / `assets/bin/ffprobe` の変更・再生成。macOS向け同梱バイナリで、`src/bundled.rs` が `include_bytes!` で埋め込む。`.gitattributes` で binary 指定しており、改行変換が入ると壊れる。再生成が必要な場合は `scripts/build-ffmpeg-macos.sh --install` を使う（外部ライブラリなしのLGPLビルド）。GPL版へ差し替えると配布物のライセンス条件が変わるため `THIRD_PARTY_NOTICES.md` の見直しが必要。
 - `Cargo.lock` の手編集。`cargo` コマンド経由でのみ更新する。
 - `target/` `third_party/` `syphon-src/` への手動配置。ビルド生成物およびCI生成物。
 - `.idea/` の編集。

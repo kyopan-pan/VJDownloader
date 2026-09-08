@@ -8,7 +8,7 @@ use std::thread;
 
 use crate::converter::{
     LOG_CONVERT_WITH_VIDEOTOOLBOX, LOG_RETRY_WITH_LIBX264, default_mp4_command, h264_encoder,
-    truncate_error,
+    libx264_retry_available, truncate_error,
 };
 use crate::paths::bin_dir;
 
@@ -134,7 +134,7 @@ pub(super) fn run_pipe_to_ffmpeg_or_cancel(
 }
 
 // ダウンロード済みファイルを既定フォーマット（H.264 MP4）へ変換する。
-// VideoToolbox が使えない環境では libx264 で再試行する。
+// libx264 が使える環境（Windows）では、VideoToolbox が失敗したときに libx264 で再試行する。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_default_format_convert(
     ffmpeg: &Path,
@@ -148,7 +148,7 @@ pub(super) fn run_default_format_convert(
     let _ = tx.send(DownloadEvent::Log(
         LOG_CONVERT_WITH_VIDEOTOOLBOX.to_string(),
     ));
-    let (status, _) = run_convert_command(ffmpeg, input, output, true, tx, progress, tracker)?;
+    let (status, stderr) = run_convert_command(ffmpeg, input, output, true, tx, progress, tracker)?;
     if status.success() {
         return Ok(());
     }
@@ -156,13 +156,18 @@ pub(super) fn run_default_format_convert(
         return Err(CANCELLED_ERROR.to_string());
     }
 
-    let _ = fs::remove_file(output);
-    let _ = tx.send(DownloadEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
-    let (status, stderr) =
-        run_convert_command(ffmpeg, input, output, false, tx, progress, tracker)?;
-    if cancel_flag.load(Ordering::Relaxed) {
-        return Err(CANCELLED_ERROR.to_string());
-    }
+    // libx264 が使えない環境では再試行せず、VideoToolbox の失敗をそのまま報告する。
+    let (status, stderr) = if libx264_retry_available() {
+        let _ = fs::remove_file(output);
+        let _ = tx.send(DownloadEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
+        let retried = run_convert_command(ffmpeg, input, output, false, tx, progress, tracker)?;
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(CANCELLED_ERROR.to_string());
+        }
+        retried
+    } else {
+        (status, stderr)
+    };
     if !status.success() {
         let detail = stderr.trim();
         return Err(if detail.is_empty() {
