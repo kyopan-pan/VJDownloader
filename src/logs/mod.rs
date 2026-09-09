@@ -2,7 +2,7 @@ pub mod file;
 pub mod ring;
 pub mod ui;
 
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use time::OffsetDateTime;
 use time::macros::format_description;
@@ -196,7 +196,7 @@ pub fn classify_tool_line(line: &str) -> Level {
 /// ログの集約点。出力先（ログ画面のリングとファイル）をここだけが知る。
 struct LogHub {
     ring: Arc<Mutex<AppLogger>>,
-    file_tx: Option<mpsc::Sender<LogEntry>>,
+    file_writer: Option<file::FileWriter>,
 }
 
 static HUB: OnceLock<LogHub> = OnceLock::new();
@@ -205,7 +205,7 @@ static HUB: OnceLock<LogHub> = OnceLock::new();
 pub fn init() -> Arc<Mutex<AppLogger>> {
     let hub = HUB.get_or_init(|| LogHub {
         ring: Arc::new(Mutex::new(AppLogger::new())),
-        file_tx: file::spawn_writer(),
+        file_writer: file::spawn_writer(),
     });
     Arc::clone(&hub.ring)
 }
@@ -231,8 +231,13 @@ pub fn emit(level: Level, source: Source, body: impl Into<String>) {
 
     // 標準出力への複製は書き込みスレッド側で行う。ここで入出力を行うと、
     // 呼び出し元（多くはUIスレッド）が書き込み待ちで止まりうる。
-    if let Some(tx) = hub.file_tx.as_ref() {
-        let _ = tx.send(entry.clone());
+    if let Some(writer) = hub.file_writer.as_ref() {
+        writer.write(entry.clone());
+    } else {
+        eprintln!(
+            "ログファイルを初期化できないため標準エラーへ退避します: {}",
+            entry.file_line()
+        );
     }
     if let Ok(mut ring) = hub.ring.lock() {
         ring.push(entry);
@@ -248,8 +253,17 @@ pub fn emit_panic(body: impl Into<String>) {
         source: Source::App,
         body: one_line(body.into()),
     };
-    if let Some(tx) = HUB.get().and_then(|hub| hub.file_tx.as_ref()) {
-        let _ = tx.send(entry);
+    if let Some(writer) = HUB.get().and_then(|hub| hub.file_writer.as_ref()) {
+        writer.write_panic(entry);
+    } else {
+        file::write_emergency(&entry);
+    }
+}
+
+/// アプリ終了時にキュー済みログを書き切り、ファイル出力スレッドを終了する。
+pub fn shutdown() {
+    if let Some(writer) = HUB.get().and_then(|hub| hub.file_writer.as_ref()) {
+        writer.shutdown();
     }
 }
 

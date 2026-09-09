@@ -62,11 +62,14 @@ pub fn run() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "VJDownloader",
         options,
         Box::new(|cc| Ok(Box::new(DownloaderApp::new(cc)))),
-    )
+    );
+    // 静的な送信口はプロセス終了まで残るため、明示的にキューを排出して writer を待つ。
+    logs::shutdown();
+    result
 }
 
 /// ワーカースレッドの panic は既定では標準エラーへ出るだけで、コンソールを持たない
