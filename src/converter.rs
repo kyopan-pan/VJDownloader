@@ -7,7 +7,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::paths::ffmpeg_path;
 use crate::theme::paint_viewport_background;
@@ -452,7 +452,7 @@ fn run_ffmpeg_conversion(
         .take()
         .ok_or_else(|| "ffmpegのログ出力を取得できませんでした。".to_string())?;
     let mut pending = Vec::new();
-    let mut error_text = String::new();
+    let mut pump = LogPump::default();
     let mut buffer = [0u8; 4096];
 
     loop {
@@ -463,17 +463,47 @@ fn run_ffmpeg_conversion(
             break;
         }
         pending.extend_from_slice(&buffer[..read]);
-        drain_log_lines(&mut pending, false, event_tx, ctx, &mut error_text);
+        drain_log_lines(&mut pending, false, event_tx, ctx, &mut pump);
     }
-    drain_log_lines(&mut pending, true, event_tx, ctx, &mut error_text);
+    drain_log_lines(&mut pending, true, event_tx, ctx, &mut pump);
 
     let status = child
         .wait()
         .map_err(|error| format!("ffmpegの終了状態を取得できませんでした: {error}"))?;
     Ok(FfmpegOutput {
         status,
-        stderr: error_text,
+        stderr: pump.error_text,
     })
+}
+
+/// ffmpeg の出力を読み進めるあいだの状態。エラー本文の蓄積と stats 行の間引きを持つ。
+#[derive(Default)]
+struct LogPump {
+    error_text: String,
+    last_stats_at: Option<Instant>,
+}
+
+impl LogPump {
+    /// stats 行をログへ流すかを判定する。`-stats_period 0.5` の生出力は毎秒2件になり、
+    /// そのまま出すとログ画面の保持件数を数分で使い切って他の記録を押し出してしまう。
+    fn allow_stats_line(&mut self) -> bool {
+        let now = Instant::now();
+        let allow = self
+            .last_stats_at
+            .is_none_or(|last| now.duration_since(last) >= STATS_LOG_INTERVAL);
+        if allow {
+            self.last_stats_at = Some(now);
+        }
+        allow
+    }
+}
+
+/// ffmpeg の stats 行をログへ出す最短間隔。進捗の手応えは残しつつ件数を抑える。
+const STATS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// ffmpeg の stats 行（`frame=... time=...`）かどうか。
+fn is_stats_line(line: &str) -> bool {
+    line.starts_with("frame=") || line.starts_with("size=")
 }
 
 fn drain_log_lines(
@@ -481,7 +511,7 @@ fn drain_log_lines(
     flush: bool,
     event_tx: &mpsc::Sender<ConversionEvent>,
     ctx: &egui::Context,
-    error_text: &mut String,
+    pump: &mut LogPump,
 ) {
     loop {
         let delimiter = pending
@@ -489,7 +519,7 @@ fn drain_log_lines(
             .position(|byte| *byte == b'\n' || *byte == b'\r');
         let Some(end) = delimiter else {
             if flush && !pending.is_empty() {
-                emit_ffmpeg_log(pending, event_tx, ctx, error_text);
+                emit_ffmpeg_log(pending, event_tx, ctx, pump);
                 pending.clear();
             }
             return;
@@ -502,7 +532,7 @@ fn drain_log_lines(
             consumed += 1;
         }
         pending.drain(..consumed);
-        emit_ffmpeg_log(&line, event_tx, ctx, error_text);
+        emit_ffmpeg_log(&line, event_tx, ctx, pump);
     }
 }
 
@@ -510,19 +540,24 @@ fn emit_ffmpeg_log(
     bytes: &[u8],
     event_tx: &mpsc::Sender<ConversionEvent>,
     ctx: &egui::Context,
-    error_text: &mut String,
+    pump: &mut LogPump,
 ) {
     let line = String::from_utf8_lossy(bytes).trim().to_string();
     if line.is_empty() {
         return;
     }
 
+    // 失敗時のエラー本文は間引かず全行を蓄える。原因はstats行の直後に出ることがある。
     const MAX_ERROR_CHARS: usize = 16_000;
-    if error_text.chars().count() < MAX_ERROR_CHARS {
-        if !error_text.is_empty() {
-            error_text.push('\n');
+    if pump.error_text.chars().count() < MAX_ERROR_CHARS {
+        if !pump.error_text.is_empty() {
+            pump.error_text.push('\n');
         }
-        error_text.push_str(&line);
+        pump.error_text.push_str(&line);
+    }
+
+    if is_stats_line(&line) && !pump.allow_stats_line() {
+        return;
     }
     let _ = event_tx.send(ConversionEvent::Log(format!("[ffmpeg] {line}")));
     ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -561,5 +596,52 @@ pub(crate) fn truncate_error(error: &str) -> String {
         format!("{text}...")
     } else {
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_ffmpeg_stats_lines() {
+        assert!(is_stats_line(
+            "frame=  120 fps= 59 q=-1.0 size=1024kB time=00:00:02.00 bitrate=4096.0kbits/s"
+        ));
+        assert!(is_stats_line(
+            "size=  512kB time=00:00:01.00 bitrate=1.0kbits/s"
+        ));
+        assert!(
+            !is_stats_line("[libx264 @ 0x7f8] using SAR=1/1"),
+            "通常のログ行をstats行と誤判定している"
+        );
+        assert!(
+            !is_stats_line("Output #0, mp4, to '/tmp/out.mp4':"),
+            "通常のログ行をstats行と誤判定している"
+        );
+    }
+
+    #[test]
+    fn stats_lines_are_throttled_but_error_text_keeps_every_line() {
+        let (tx, rx) = mpsc::channel();
+        let ctx = egui::Context::default();
+        let mut pump = LogPump::default();
+
+        // `-stats_period 0.5` を模して連続で流し込む。間隔を空けないので1件だけ通るのが正しい。
+        for index in 0..5 {
+            let line = format!("frame= {index} fps=59 time=00:00:0{index}.00");
+            emit_ffmpeg_log(line.as_bytes(), &tx, &ctx, &mut pump);
+        }
+        // stats行でない行は間引かない。
+        emit_ffmpeg_log(b"Output #0, mp4, to '/tmp/out.mp4':", &tx, &ctx, &mut pump);
+
+        let logged = rx.try_iter().count();
+        assert_eq!(logged, 2, "stats行の間引きが効いていない: {logged}件");
+        // 失敗時の原因調査に使うエラー本文は間引かず全行を保持する。
+        assert_eq!(
+            pump.error_text.lines().count(),
+            6,
+            "エラー本文から行が失われている"
+        );
     }
 }

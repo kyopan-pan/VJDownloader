@@ -13,7 +13,7 @@
 
 ```bash
 cargo check                      # 型チェック（既定フィーチャー: syphon 有効）
-cargo test                       # 全テスト（43件）
+cargo test                       # 全テスト（56件）
 cargo test search_index -- --test-threads=1   # 検索インデックスのみ直列実行
 cargo clippy --all-targets       # lint
 cargo fmt                        # 整形
@@ -74,7 +74,8 @@ cargo run                        # 起動（macOS）
 - `src/stream/`: ストリーム再生画面と Syphon 出力（`syphon` フィーチャー時のみ、macOS限定）。
 - `src/converter.rs`: MP4変換画面。H.264エンコーダは macOS が `h264_videotoolbox`、Windows が `libx264`。
 - `src/speed_test/`: 通信速度測定画面。
-- `src/logs/`: ログ収集と表示画面。
+- `src/logs/`: ログの集約点（`mod.rs`）、表示用リングバッファ（`ring.rs`）、ファイル出力とローテーション（`file.rs`）、ログ画面（`ui.rs`）。
+  呼び出し側はロガーの参照を持たず、`log_error!`/`log_warn!`/`log_info!` マクロで `mod.rs` の集約点へ送る。
 - `src/platform/`: OS依存実装の境界層。`common/` に境界をまたぐ共通型、`macos/` と `windows/` に各実装。配下は各OSでのみコンパイルされるため、ファイル内に `cfg` は不要。
 
 ## コードスタイル

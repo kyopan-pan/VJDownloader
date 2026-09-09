@@ -1,18 +1,30 @@
-use std::time::Duration;
-
 use arboard::Clipboard;
 use eframe::egui;
+use time::Duration;
 
 use std::sync::{Arc, Mutex};
 
 use crate::cursor::pointing;
-use crate::logs::AppLogger;
+use crate::logs::{AppLogger, Level, file};
 use crate::theme::paint_viewport_background;
 
 /// フッターのボタン文字サイズ。ボタン行の高さ計算と描画で同じ値を使う。
 const FOOTER_TEXT_SIZE: f32 = 11.5;
+/// クリップボードへコピーする範囲。
+const COPY_WINDOW: Duration = Duration::minutes(10);
+
 /// リストとフッターの間隔。
 const FOOTER_GAP: f32 = 8.0;
+
+/// レベルごとの文字色。エラーと警告を目で拾えるようにし、詳細ログは沈める。
+fn level_color(level: Level) -> egui::Color32 {
+    match level {
+        Level::Error => egui::Color32::from_rgb(248, 113, 113),
+        Level::Warn => egui::Color32::from_rgb(251, 191, 36),
+        Level::Info => egui::Color32::from_rgb(229, 231, 235),
+        Level::Debug => egui::Color32::from_rgb(148, 163, 184),
+    }
+}
 
 pub struct LogUiState {
     pub show_logs: bool,
@@ -120,7 +132,7 @@ fn render_log_contents(
                                 return;
                             }
 
-                            for (index, line) in logs.lines().enumerate() {
+                            for (index, entry) in logs.entries().enumerate() {
                                 let fill = if index % 2 == 1 {
                                     egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6)
                                 } else {
@@ -131,10 +143,10 @@ fn render_log_contents(
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
                                         ui.label(
-                                            egui::RichText::new(line)
+                                            egui::RichText::new(entry.display_line())
                                                 .monospace()
                                                 .size(12.0)
-                                                .color(egui::Color32::from_rgb(229, 231, 235)),
+                                                .color(level_color(entry.level)),
                                         );
                                     });
                             }
@@ -144,9 +156,12 @@ fn render_log_contents(
             ui.add_space(FOOTER_GAP);
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("アプリを終了するとログはクリアされます。")
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                    egui::RichText::new(format!(
+                        "ログファイル: {}",
+                        file::current_file_path().to_string_lossy()
+                    ))
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(148, 163, 184)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let clear_btn = egui::Button::new(
@@ -187,10 +202,10 @@ fn render_log_contents(
     if copy_clicked {
         let snapshot = logs
             .lock()
-            .map(|logs| logs.build_recent_snapshot(Duration::from_secs(10 * 60)))
+            .map(|logs| logs.build_recent_snapshot(COPY_WINDOW))
             .unwrap_or_default();
         if let Err(err) = copy_to_clipboard(&snapshot) {
-            eprintln!("ログのコピーに失敗しました: {err}");
+            crate::log_error!(App, "ログのコピーに失敗しました: {err}");
         }
     }
 }
@@ -209,7 +224,19 @@ fn log_viewport_id() -> egui::ViewportId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logs::{LogEntry, Source};
     use crate::theme::apply_theme;
+
+    const LEVELS: [Level; 4] = [Level::Debug, Level::Info, Level::Warn, Level::Error];
+
+    fn test_entry(level: Level, index: usize) -> LogEntry {
+        LogEntry {
+            at: time::OffsetDateTime::now_utc(),
+            level,
+            source: Source::App,
+            body: format!("テストログ {index}"),
+        }
+    }
 
     /// ログ画面の中身を描画し、下端の余白を含めて実際に使われた高さを返す。
     fn content_bottom(window_height: f32, log_lines: usize) -> f32 {
@@ -219,7 +246,7 @@ mod tests {
         let logs = Arc::new(Mutex::new(AppLogger::new()));
         if let Ok(mut logs) = logs.lock() {
             for index in 0..log_lines {
-                logs.push(format!("テストログ {index}"));
+                logs.push(test_entry(LEVELS[index % LEVELS.len()], index));
             }
         }
 
@@ -244,6 +271,28 @@ mod tests {
             });
         }
         used_bottom
+    }
+
+    #[test]
+    fn every_level_has_its_own_color() {
+        // 同じ色のレベルがあると色分けの意味が無くなるため、4色すべてが異なることを確かめる。
+        let mut colors = LEVELS.map(level_color).to_vec();
+        colors.sort_by_key(|color| color.to_array());
+        colors.dedup();
+        assert_eq!(colors.len(), LEVELS.len(), "レベルの色が重複している");
+    }
+
+    #[test]
+    fn display_line_aligns_columns_across_levels() {
+        // 等幅フォントで桁を揃える前提なので、本文の開始位置がレベルによってずれないこと。
+        let offsets = LEVELS.map(|level| {
+            let line = test_entry(level, 0).display_line();
+            line.find("テストログ").expect("本文が欠けている")
+        });
+        assert!(
+            offsets.iter().all(|offset| *offset == offsets[0]),
+            "レベルによって本文の開始位置がずれている: {offsets:?}"
+        );
     }
 
     #[test]

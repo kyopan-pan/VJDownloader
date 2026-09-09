@@ -21,6 +21,25 @@ pub fn settings_file_path() -> PathBuf {
     settings_dir().join("settings.properties")
 }
 
+// ログファイルの保存先。設定や検索DBと違いOSの規約側へ置く。macOSは Console.app が拾える
+// `~/Library/Logs`、Windowsはマシン間で漫遊させない `%LOCALAPPDATA%` 配下を使い、
+// ユーザーが自力でログへ到達できるようにする。
+pub fn log_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.join("Library").join("Logs").join("VJDownloader")
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        dirs::data_local_dir()
+            .unwrap_or_else(app_data_dir)
+            .join("VJDownloader")
+            .join("logs")
+    }
+}
+
 pub fn search_index_db_path() -> PathBuf {
     app_data_dir().join("search_index.sqlite3")
 }
