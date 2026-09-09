@@ -1,6 +1,6 @@
 [package]
 name = "VJDownloader"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 description = "クリップボードのURLから動画をダウンロードし、ローカルのMP4を管理・送出するVJ向けデスクトップアプリ"
 repository = "https://github.com/kyopan-pan/VJDownloader"
@@ -52,3 +52,9 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Windowsホストでビルドするときだけ exe へアイコン等のリソースを埋め込む。
+# build-dependencies の cfg はホスト評価のため、macOS からの `--target x86_64-pc-windows-msvc`
+# による型チェックではこのクレート自体が入らず、rc.exe 不在でも check が通る。
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"

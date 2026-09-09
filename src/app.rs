@@ -41,6 +41,10 @@ pub fn run() -> eframe::Result<()> {
         .with_always_on_top();
     #[cfg(target_os = "macos")]
     let viewport = viewport.with_icon(egui::IconData::default());
+    // Windows はアプリバンドルが無く、指定しないと eframe 既定の egui ロゴが
+    // タスクバーとタイトルバーに出るため、実行時にも自前のアイコンを渡す。
+    #[cfg(target_os = "windows")]
+    let viewport = viewport.with_icon(window_icon());
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -51,6 +55,15 @@ pub fn run() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(DownloaderApp::new(cc)))),
     )
+}
+
+/// タスクバー・タイトルバー用のアイコン。
+/// eframe が必要なサイズへ縮小するため、素材は最大解像度の256pxを渡す。
+#[cfg(target_os = "windows")]
+fn window_icon() -> egui::IconData {
+    const ICON_PNG: &[u8] = include_bytes!("../assets/icon/App.iconset/icon_256x256.png");
+    // 埋め込み画像なので実行時に壊れることはなく、失敗時は既定アイコンで起動を続ける。
+    eframe::icon_data::from_png_bytes(ICON_PNG).unwrap_or_default()
 }
 
 #[derive(Clone)]

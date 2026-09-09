@@ -7,7 +7,7 @@
 - 対応プラットフォームは macOS と Windows のみ。それ以外のターゲットは `compile_error!` でビルドを止める。
 - yt-dlp / Deno / ffmpeg / ffprobe を外部ツールとして `~/.vjdownloader/bin` から実行する。未導入時は初回セットアップ画面で取得する。
 - 明確に動作を保証しているサイトはYouTube/Animethemes.moeの2サイト。
-- 仕様は `docs/spec.md`。検索エンジンの設計は `docs/search.md`。
+- 仕様は `docs/spec.md`。検索エンジンの設計は `docs/search.md`。ビルド・CI・リリース成果物は `docs/release.md`。
 
 ## Commands
 
@@ -87,6 +87,8 @@ cargo run                        # 起動（macOS）
 
 - 仕様を追加・変更したら `docs/spec.md` の該当箇所を追記・更新する。仕様を削除したら該当記述も削除する。
 - `docs/spec.md` はプラットフォーム差分がある項目に macOS / Windows を明記する。
+- `docs/spec.md` はアプリの振る舞いだけを書く。設計判断や実装ファイルの案内は `docs/search.md`、
+  ビルド構成・CI・配布物は `docs/release.md` に置き、同じ内容を二重に書かない。
 - ドキュメント内のファイル参照はリポジトリルートからの相対パスで書く。ローカルの絶対パスを書かない。
 
 ## コミット / PR

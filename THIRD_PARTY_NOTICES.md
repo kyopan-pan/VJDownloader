@@ -11,18 +11,17 @@ VJDownloader 本体のソースコードは [MIT License](LICENSE) です。
 macOS向けのビルドは、`assets/bin/ffmpeg` と `assets/bin/ffprobe` を `include_bytes!` で
 実行ファイルへ埋め込みます（`src/bundled.rs`）。
 
-| 項目 | 内容 |
-| --- | --- |
+| 項目       | 内容                                                                                            |
+|------------|-------------------------------------------------------------------------------------------------|
 | バージョン | `git-2026-09-08-1de77bb`（FFmpeg upstream コミット `1de77bb8987e2c7364302c91b9f13958e419124e`） |
-| 対象 | macOS 13.0以降 / arm64 |
-| ライセンス | LGPL-2.1-or-later（[licenses/LGPL-2.1.txt](licenses/LGPL-2.1.txt)） |
-| ビルド | 本リポジトリの [scripts/build-ffmpeg-macos.sh](scripts/build-ffmpeg-macos.sh) |
+| 対象       | macOS 13.0以降 / arm64                                                                          |
+| ライセンス | LGPL-2.1-or-later（[licenses/LGPL-2.1.txt](licenses/LGPL-2.1.txt)）                             |
+| ビルド     | 本リポジトリの [scripts/build-ffmpeg-macos.sh](scripts/build-ffmpeg-macos.sh)                   |
 
 VJDownloader が必要とする機能（`h264_videotoolbox` エンコード、ネイティブデコーダ、
 `audiotoolbox` 出力、`rawvideo` パイプ、https 入力、ffprobe のタグ取得）はすべて
 FFmpeg 内蔵で足りるため、外部ライブラリを一切リンクしていません。
-GPLコンポーネント（libx264 / libx265 など）を含まないため、ライセンスは
-**LGPL-2.1-or-later** です。
+GPLコンポーネント（libx264 / libx265 など）を含まないため、ライセンスは **LGPL-2.1-or-later** です。
 
 ビルド時の configuration は次のとおりです。
 
@@ -120,10 +119,10 @@ cargo install cargo-license && cargo license
 以下は初回セットアップ時にユーザーの環境へダウンロードされるもので、
 VJDownloader の配布物には含まれません。
 
-| ソフトウェア | ライセンス | 配布元 |
-| --- | --- | --- |
-| yt-dlp | Unlicense（パブリックドメイン相当） | <https://github.com/yt-dlp/yt-dlp> |
-| Deno | MIT | <https://github.com/denoland/deno> |
+| ソフトウェア                | ライセンス                                              | 配布元                                  |
+|-----------------------------|---------------------------------------------------------|-----------------------------------------|
+| yt-dlp                      | Unlicense（パブリックドメイン相当）                     | <https://github.com/yt-dlp/yt-dlp>      |
+| Deno                        | MIT                                                     | <https://github.com/denoland/deno>      |
 | FFmpeg / FFprobe（Windows） | GPL-2.0-or-later（`win64-gpl` / `winarm64-gpl` ビルド） | <https://github.com/BtbN/FFmpeg-Builds> |
 
 Windows向けビルドはFFmpegを同梱しないため、Windowsの配布物にGPLの義務は生じません。
