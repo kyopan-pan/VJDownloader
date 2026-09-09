@@ -9,6 +9,11 @@ use crate::cursor::pointing;
 use crate::logs::AppLogger;
 use crate::theme::paint_viewport_background;
 
+/// フッターのボタン文字サイズ。ボタン行の高さ計算と描画で同じ値を使う。
+const FOOTER_TEXT_SIZE: f32 = 11.5;
+/// リストとフッターの間隔。
+const FOOTER_GAP: f32 = 8.0;
+
 pub struct LogUiState {
     pub show_logs: bool,
 }
@@ -82,7 +87,14 @@ fn render_log_contents(
             );
             ui.add_space(8.0);
 
-            let list_height = (ui.available_height() - 42.0).max(130.0);
+            // ボタン行の高さはテーマのボタン余白とフォント高で決まる。固定値で見積もると
+            // 余白を変えたときに確保量が足りず、フッターがウィンドウ下端へ張り付く。
+            let button_height = ui
+                .ctx()
+                .fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(FOOTER_TEXT_SIZE)))
+                + ui.spacing().button_padding.y * 2.0;
+            let footer_height = ui.spacing().item_spacing.y * 2.0 + FOOTER_GAP + button_height;
+            let list_height = (ui.available_height() - footer_height).max(130.0);
             egui::Frame::NONE
                 .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10))
                 .stroke(egui::Stroke::new(
@@ -129,7 +141,7 @@ fn render_log_contents(
                         });
                 });
 
-            ui.add_space(8.0);
+            ui.add_space(FOOTER_GAP);
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("アプリを終了するとログはクリアされます。")
@@ -139,7 +151,7 @@ fn render_log_contents(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let clear_btn = egui::Button::new(
                         egui::RichText::new("表示をクリア")
-                            .size(11.5)
+                            .size(FOOTER_TEXT_SIZE)
                             .color(egui::Color32::from_rgb(226, 232, 240)),
                     )
                     .fill(egui::Color32::from_rgba_unmultiplied(226, 232, 240, 20))
@@ -153,7 +165,7 @@ fn render_log_contents(
 
                     let copy_btn = egui::Button::new(
                         egui::RichText::new("直近10分をコピー")
-                            .size(11.5)
+                            .size(FOOTER_TEXT_SIZE)
                             .color(egui::Color32::from_rgb(226, 232, 240)),
                     )
                     .fill(egui::Color32::from_rgba_unmultiplied(226, 232, 240, 20))
@@ -192,4 +204,57 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 
 fn log_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("log_viewport")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::apply_theme;
+
+    /// ログ画面の中身を描画し、下端の余白を含めて実際に使われた高さを返す。
+    fn content_bottom(window_height: f32, log_lines: usize) -> f32 {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+
+        let logs = Arc::new(Mutex::new(AppLogger::new()));
+        if let Ok(mut logs) = logs.lock() {
+            for index in 0..log_lines {
+                logs.push(format!("テストログ {index}"));
+            }
+        }
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(760.0, window_height),
+            )),
+            ..Default::default()
+        };
+
+        let mut used_bottom = 0.0;
+        // ScrollArea は前フレームの情報で高さが決まるため、2フレーム描画してから測る。
+        for _ in 0..2 {
+            used_bottom = 0.0;
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                egui::Frame::NONE.show(ui, |ui| {
+                    render_log_contents(ui, &logs);
+                    // ui.max_rect() は内容に合わせて広がるため、ウィンドウ高と直接比べる。
+                    used_bottom = ui.min_rect().bottom();
+                });
+            });
+        }
+        used_bottom
+    }
+
+    #[test]
+    fn footer_keeps_margin_from_window_bottom() {
+        // ボタン行の高さを固定値で見積もると下端へ張り付くため、余白が残ることを確認する。
+        for (height, lines) in [(460.0, 0), (460.0, 200), (280.0, 0), (900.0, 5)] {
+            let used_bottom = content_bottom(height, lines);
+            assert!(
+                used_bottom <= height,
+                "高さ{height}・{lines}行でフッターが下端をはみ出した: 使用{used_bottom} > 高さ{height}"
+            );
+        }
+    }
 }
