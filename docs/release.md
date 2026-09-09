@@ -19,6 +19,9 @@
 
 - CIはmacOS（arm64）とWindows（x64）の両方をビルドする。配布物はmacOSが`.app`入りのDMG、Windowsが`.exe`とライセンス文書を入れたZIP。
 - ワークフローは`.github/workflows/build-macos.yml`と`.github/workflows/build-windows.yml`。
+- `actions/upload-artifact`はアップロード対象を必ずZIPへまとめるため、ジョブ側でZIPを作らない。
+  Windowsの配布物はフォルダのまま渡し、Actionsからのダウンロードが1層のZIPで完結するようにする。
+  リリース添付用のZIPは`publish`ジョブで1層だけ作る。
 
 ## リリース
 
