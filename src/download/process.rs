@@ -145,9 +145,7 @@ pub(super) fn run_default_format_convert(
     tracker: &ProcessTracker,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let _ = tx.send(DownloadEvent::Log(
-        LOG_CONVERT_WITH_VIDEOTOOLBOX.to_string(),
-    ));
+    crate::log_info!(Download, "{LOG_CONVERT_WITH_VIDEOTOOLBOX}");
     let (status, stderr) = run_convert_command(ffmpeg, input, output, true, tx, progress, tracker)?;
     if status.success() {
         return Ok(());
@@ -159,7 +157,7 @@ pub(super) fn run_default_format_convert(
     // libx264 が使えない環境では再試行せず、VideoToolbox の失敗をそのまま報告する。
     let (status, stderr) = if libx264_retry_available() {
         let _ = fs::remove_file(output);
-        let _ = tx.send(DownloadEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
+        crate::log_warn!(Download, "{LOG_RETRY_WITH_LIBX264}");
         let retried = run_convert_command(ffmpeg, input, output, false, tx, progress, tracker)?;
         if cancel_flag.load(Ordering::Relaxed) {
             return Err(CANCELLED_ERROR.to_string());
@@ -338,14 +336,25 @@ fn handle_stream_line(
     handle_progress_line(trimmed, progress, tx);
     guard::notify(trimmed, tx);
 
+    // 強制終了させた子プロセスが吐く進捗と終了エラーは記録しない。進捗バーの更新
+    // （handle_progress_line）はキャンセル表示のために続ける。
+    if progress.is_cancelling() {
+        return;
+    }
+
     if let Some(percent) = download_percent {
         if let Some(percent) = progress.next_log_percent(percent) {
-            let _ = tx.send(DownloadEvent::Log(format!("ダウンロード進捗: {percent}%")));
+            crate::log_info!(Download, "ダウンロード進捗: {percent}%");
         }
         return;
     }
 
-    let _ = tx.send(DownloadEvent::Log(trimmed.to_string()));
+    // yt-dlp / ffmpeg の生出力なので、行の慣習からレベルを推定する。
+    crate::logs::emit(
+        crate::logs::classify_tool_line(trimmed),
+        crate::logs::Source::Download,
+        trimmed,
+    );
 }
 
 // 保存先などの通知行は除外し、yt-dlp の `[download] xx.x%` 行だけを判定する。

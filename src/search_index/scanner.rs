@@ -27,7 +27,7 @@ pub(super) fn trigger_reindex_all_from_db(db_path: &Path, write_tx: &Sender<Writ
     let conn = match open_connection(db_path) {
         Ok(conn) => conn,
         Err(err) => {
-            eprintln!("[search-index] failed to open DB for fallback reindex: {err}");
+            crate::log_error!(Search, "再インデックス用のDBを開けませんでした: {err}");
             return;
         }
     };
@@ -35,7 +35,10 @@ pub(super) fn trigger_reindex_all_from_db(db_path: &Path, write_tx: &Sender<Writ
     let mut stmt = match conn.prepare("SELECT root_id, root_path FROM roots WHERE is_enabled = 1") {
         Ok(stmt) => stmt,
         Err(err) => {
-            eprintln!("[search-index] failed to query roots for fallback reindex: {err}");
+            crate::log_error!(
+                Search,
+                "再インデックス対象フォルダの照会に失敗しました: {err}"
+            );
             return;
         }
     };
@@ -45,7 +48,10 @@ pub(super) fn trigger_reindex_all_from_db(db_path: &Path, write_tx: &Sender<Writ
     }) {
         Ok(rows) => rows,
         Err(err) => {
-            eprintln!("[search-index] failed to iterate roots for fallback reindex: {err}");
+            crate::log_error!(
+                Search,
+                "再インデックス対象フォルダの読み出しに失敗しました: {err}"
+            );
             return;
         }
     };
@@ -59,10 +65,10 @@ pub(super) fn trigger_reindex_all_from_db(db_path: &Path, write_tx: &Sender<Writ
         let db_path = db_path.to_path_buf();
         thread::spawn(move || {
             if let Err(err) = scan_root(root_id, &root_path, &db_path, &write_tx) {
-                eprintln!(
-                    "[search-index] fallback reindex failed for {}: {}",
-                    root_path.to_string_lossy(),
-                    err
+                crate::log_error!(
+                    Search,
+                    "再インデックスに失敗しました: {} ({err})",
+                    root_path.to_string_lossy()
                 );
             }
         });
@@ -238,10 +244,10 @@ pub(super) fn build_record_from_path(
                 (comment, Some(normalized))
             }
             Err(err) => {
-                eprintln!(
-                    "[search-index] failed to read video comment from {}: {}",
-                    path.to_string_lossy(),
-                    err
+                crate::log_warn!(
+                    Search,
+                    "動画コメントの読み取りに失敗しました: {} ({err})",
+                    path.to_string_lossy()
                 );
                 (String::new(), None)
             }

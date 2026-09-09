@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use time::{Duration, OffsetDateTime};
 
-use super::LogEntry;
+use super::{LogEntry, LogFilter};
 
 /// ログ画面に保持する件数の上限。
 const MAX_ENTRIES: usize = 1000;
@@ -39,9 +39,9 @@ impl AppLogger {
         self.entries.iter()
     }
 
-    /// 直近 `duration` 分のログを1つの文字列へまとめる。単調増加の Instant ではなく実時刻で
-    /// 判定するため、スリープを跨いでも画面の表示と範囲が一致する。
-    pub fn build_recent_snapshot(&self, duration: Duration) -> String {
+    /// 直近 `duration` 分のログのうち `filter` を通るものを1つの文字列へまとめる。
+    /// 単調増加の Instant ではなく実時刻で判定するため、スリープを跨いでも画面の表示と範囲が一致する。
+    pub fn build_recent_snapshot(&self, duration: Duration, filter: &LogFilter) -> String {
         if duration.is_zero() {
             return String::new();
         }
@@ -54,6 +54,9 @@ impl AppLogger {
             if let Some(cutoff) = cutoff
                 && entry.at < cutoff
             {
+                continue;
+            }
+            if !filter.matches(entry) {
                 continue;
             }
             if !out.is_empty() {
@@ -107,8 +110,46 @@ mod tests {
         logger.push(entry(now - Duration::minutes(30), "古い行"));
         logger.push(entry(now - Duration::minutes(1), "新しい行"));
 
-        let snapshot = logger.build_recent_snapshot(Duration::minutes(10));
+        let snapshot = logger.build_recent_snapshot(Duration::minutes(10), &LogFilter::default());
         assert!(!snapshot.contains("古い行"), "範囲外の行が含まれている");
         assert!(snapshot.contains("新しい行"), "範囲内の行が欠けている");
+    }
+
+    #[test]
+    fn snapshot_applies_filter() {
+        let mut logger = AppLogger::new();
+        let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+        logger.push(entry(now, "情報の行"));
+        logger.push(LogEntry {
+            at: now,
+            level: Level::Error,
+            source: Source::Download,
+            body: "エラーの行".to_string(),
+        });
+
+        let filter = LogFilter {
+            min_level: Level::Error,
+            source: None,
+        };
+        let snapshot = logger.build_recent_snapshot(Duration::minutes(10), &filter);
+        assert!(
+            !snapshot.contains("情報の行"),
+            "レベル絞り込みが効いていない"
+        );
+        assert!(snapshot.contains("エラーの行"), "対象の行が欠けている");
+
+        let filter = LogFilter {
+            min_level: Level::Debug,
+            source: Some(Source::App),
+        };
+        let snapshot = logger.build_recent_snapshot(Duration::minutes(10), &filter);
+        assert!(
+            snapshot.contains("情報の行"),
+            "発生源の一致する行が欠けている"
+        );
+        assert!(
+            !snapshot.contains("エラーの行"),
+            "発生源絞り込みが効いていない"
+        );
     }
 }

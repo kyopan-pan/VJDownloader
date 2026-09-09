@@ -75,10 +75,16 @@ impl SpeedTestUiState {
                     self.started_at = None;
                     match result {
                         Ok(result) => {
+                            crate::log_info!(
+                                SpeedTest,
+                                "通信速度を測定しました: 下り{:.1}Mbps",
+                                result.download_mbps
+                            );
                             self.result = Some(result);
                             self.error = None;
                         }
                         Err(err) => {
+                            crate::log_error!(SpeedTest, "通信速度の測定に失敗しました: {err}");
                             self.result = None;
                             self.error = Some(err);
                         }

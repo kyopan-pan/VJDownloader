@@ -24,7 +24,6 @@ pub use tools::{ensure_deno, ensure_yt_dlp, js_runtime_arg, update_deno, update_
 pub use tools::ensure_ffmpeg_tools;
 
 pub enum DownloadEvent {
-    Log(String),
     Progress(ProgressUpdate),
     // Bot対策（403/429 や待機）を検出したときの通知。
     Guard(GuardNotice),
@@ -182,21 +181,30 @@ impl ProgressUpdate {
 pub(super) struct ProgressContext {
     start: Instant,
     active: Arc<AtomicBool>,
+    // 診断ログの送出側でキャンセル中かを判定するために持つ。強制終了された子プロセスが
+    // 吐く終了エラーをログへ残さないための抑制で、以前はUI側で捨てていた。
+    cancel: Arc<AtomicBool>,
     progress_started: AtomicBool,
     post_processing: AtomicBool,
     last_logged_percent: AtomicU32,
 }
 
 impl ProgressContext {
-    fn new(active: Arc<AtomicBool>) -> Arc<Self> {
+    fn new(active: Arc<AtomicBool>, cancel: Arc<AtomicBool>) -> Arc<Self> {
         active.store(true, Ordering::Relaxed);
         Arc::new(Self {
             start: Instant::now(),
             active,
+            cancel,
             progress_started: AtomicBool::new(false),
             post_processing: AtomicBool::new(false),
             last_logged_percent: AtomicU32::new(0),
         })
+    }
+
+    // キャンセル中は外部ツールの出力をログへ残さない。
+    pub(super) fn is_cancelling(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 
     pub(super) fn elapsed(&self) -> String {
@@ -367,7 +375,7 @@ pub fn run_download(
     cancel_flag: Arc<AtomicBool>,
     tracker: ProcessTracker,
 ) {
-    let progress = ProgressContext::new(active_flag);
+    let progress = ProgressContext::new(active_flag, cancel_flag.clone());
     let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::info_loading(
         &progress.elapsed(),
     )));
@@ -407,7 +415,7 @@ fn run_download_inner(
     // 必須ツールの存在確認を先に行う。
     // Windowsは起動時のバックグラウンド取得が終わっていない場合があるため、ここでも取得を試みる。
     #[cfg(target_os = "windows")]
-    tools::ensure_ffmpeg_tools(Some(tx))?;
+    tools::ensure_ffmpeg_tools()?;
     ensure_bundled_tools()?;
     let ffmpeg = ffmpeg_path();
     if !ffmpeg.exists() {
@@ -442,10 +450,7 @@ fn run_download_inner(
             tracker,
         )
     } else {
-        let _ = tx.send(DownloadEvent::Log(format!(
-            "ダウンロード仕様: {}",
-            mode.label()
-        )));
+        crate::log_info!(Download, "ダウンロード仕様: {}", mode.label());
         run_yt_dlp_download(
             &url,
             &staging_dir,
@@ -519,9 +524,10 @@ fn run_yt_dlp_download(
             return Err(format!("yt-dlp exited with status: {status}"));
         };
 
-        let _ = tx.send(DownloadEvent::Log(
-            "H.264優先モードに失敗。互換モードで再試行します。".to_string(),
-        ));
+        crate::log_warn!(
+            Download,
+            "H.264優先モードに失敗。互換モードで再試行します。"
+        );
         // キャンセル中は実行エラーよりキャンセルを優先して報告する。
         let status = run(fallback_args);
         if cancel_flag.load(Ordering::Relaxed) {
@@ -569,10 +575,11 @@ fn convert_staged_files_to_default_format(
         if cancel_flag.load(Ordering::Relaxed) {
             return Err(CANCELLED_ERROR.to_string());
         }
-        let _ = tx.send(DownloadEvent::Log(format!(
+        crate::log_info!(
+            Download,
             "既定フォーマットへ変換します: {}",
             source.file_name().unwrap_or_default().to_string_lossy()
-        )));
+        );
         let temporary = staging::default_format_temp_path(&source);
         let result = process::run_default_format_convert(
             ffmpeg,

@@ -101,6 +101,7 @@ impl StreamDeck {
         let cache_dir = match tempfile::Builder::new().prefix("vjstream-").tempdir() {
             Ok(dir) => dir,
             Err(err) => {
+                crate::log_error!(Stream, "一時キャッシュを作成できませんでした: {err}");
                 self.error = Some(format!("一時キャッシュを作成できませんでした: {err}"));
                 return;
             }
@@ -694,7 +695,10 @@ fn publish_master(stream: &mut StreamUiState, ctx: &egui::Context) {
                 crate::stream::syphon::SyphonPublisher::server_name(),
             ) {
                 Ok(publisher) => state.publisher = Some(publisher),
-                Err(error) => state.error = Some(error),
+                Err(error) => {
+                    crate::log_error!(Stream, "Syphon出力の初期化に失敗しました: {error}");
+                    state.error = Some(error);
+                }
             }
         }
         if let Some(publisher) = state.publisher.as_ref() {

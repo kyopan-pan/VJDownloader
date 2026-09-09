@@ -23,6 +23,15 @@ enum ToolKind {
     Deno,
 }
 
+impl ToolKind {
+    fn label(self) -> &'static str {
+        match self {
+            ToolKind::YtDlp => "yt-dlp",
+            ToolKind::Deno => "Deno",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ToolState {
     version: String,
@@ -269,14 +278,15 @@ impl SettingsUiState {
         let tx = self.tool_tx.clone();
         thread::spawn(move || {
             let result = match (kind, action) {
-                (ToolKind::YtDlp, ToolAction::Install) => ensure_yt_dlp(None),
-                (ToolKind::YtDlp, ToolAction::Update) => update_yt_dlp(None),
-                (ToolKind::Deno, ToolAction::Install) => ensure_deno(None),
-                (ToolKind::Deno, ToolAction::Update) => update_deno(None),
+                (ToolKind::YtDlp, ToolAction::Install) => ensure_yt_dlp(),
+                (ToolKind::YtDlp, ToolAction::Update) => update_yt_dlp(),
+                (ToolKind::Deno, ToolAction::Install) => ensure_deno(),
+                (ToolKind::Deno, ToolAction::Update) => update_deno(),
             };
 
             let mut state = ToolState::check(kind);
             if let Err(err) = result {
+                crate::log_error!(Setup, "{}のセットアップに失敗しました: {err}", kind.label());
                 state.status = format!("セットアップに失敗しました: {err}");
             }
             let _ = tx.send(ToolUpdate { kind, state });

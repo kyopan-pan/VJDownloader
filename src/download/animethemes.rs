@@ -42,12 +42,10 @@ pub(super) fn run_animethemes_pipeline(
     ensure_conversion_encoder(ffmpeg)?;
     let output_path = build_animethemes_output_path(url, output_dir);
 
-    let direct_url = fetch_animethemes_direct_webm(url, tx)?;
+    let direct_url = fetch_animethemes_direct_webm(url)?;
     match direct_url {
         Some(webm_url) => {
-            let _ = tx.send(DownloadEvent::Log(format!(
-                "AnimeThemes直リンクを取得しました: {webm_url}"
-            )));
+            crate::log_info!(Download, "AnimeThemes直リンクを取得しました: {webm_url}");
             let direct_result = stream_animethemes_webm_to_mp4_with_gpu(
                 &webm_url,
                 ffmpeg,
@@ -61,12 +59,8 @@ pub(super) fn run_animethemes_pipeline(
                 Ok(()) => {}
                 Err(err) if err == CANCELLED_ERROR => return Err(err),
                 Err(err) => {
-                    let _ = tx.send(DownloadEvent::Log(format!(
-                        "AnimeThemes直リンク経路で失敗しました: {err}"
-                    )));
-                    let _ = tx.send(DownloadEvent::Log(
-                        "yt-dlpフォールバックへ切り替えます。".to_string(),
-                    ));
+                    crate::log_warn!(Download, "AnimeThemes直リンク経路で失敗しました: {err}");
+                    crate::log_info!(Download, "yt-dlpフォールバックへ切り替えます。");
                     run_animethemes_yt_dlp_fallback(
                         url,
                         yt_dlp,
@@ -81,9 +75,10 @@ pub(super) fn run_animethemes_pipeline(
             }
         }
         None => {
-            let _ = tx.send(DownloadEvent::Log(
-                "AnimeThemes直リンク取得に失敗。yt-dlpでフォールバックします。".to_string(),
-            ));
+            crate::log_warn!(
+                Download,
+                "AnimeThemes直リンク取得に失敗。yt-dlpでフォールバックします。"
+            );
             run_animethemes_yt_dlp_fallback(
                 url,
                 yt_dlp,
@@ -148,9 +143,7 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
     tracker: &ProcessTracker,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let _ = tx.send(DownloadEvent::Log(
-        "動画ダウンロードと変換を同時に開始します。".to_string(),
-    ));
+    crate::log_info!(Download, "動画ダウンロードと変換を同時に開始します。");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
         .user_agent(ANIMETHEMES_USER_AGENT)
@@ -221,20 +214,23 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
         }
     };
     if let Some(total) = total_bytes {
-        let _ = tx.send(DownloadEvent::Log(format!(
+        crate::log_info!(
+            Download,
             "動画サイズを確認しました: {:.1}MB",
             total as f64 / (1024.0 * 1024.0)
-        )));
+        );
     } else {
-        let _ = tx.send(DownloadEvent::Log(
-            "動画サイズを取得できなかったため、MBベースで進捗ログを表示します。".to_string(),
-        ));
+        crate::log_warn!(
+            Download,
+            "動画サイズを取得できなかったため、MBベースで進捗ログを表示します。"
+        );
     }
 
-    let _ = tx.send(DownloadEvent::Log(format!(
+    crate::log_info!(
+        Download,
         "ffmpeg({})でストリーミング変換を開始します。",
         h264_encoder()
-    )));
+    );
 
     let mut ffmpeg_cmd = Command::new(ffmpeg);
     ffmpeg_cmd
@@ -328,18 +324,16 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
                 let bucket = (percent / 5.0).floor() as i64;
                 if bucket > last_log_bucket {
                     last_log_bucket = bucket;
-                    let _ = tx.send(DownloadEvent::Log(format!(
-                        "ダウンロード進捗: {:.1}%",
-                        percent
-                    )));
+                    crate::log_info!(Download, "ダウンロード進捗: {percent:.1}%");
                 }
             }
         } else if downloaded >= last_bytes_log.saturating_add(10 * 1024 * 1024) {
             last_bytes_log = downloaded;
-            let _ = tx.send(DownloadEvent::Log(format!(
+            crate::log_info!(
+                Download,
                 "ダウンロード進捗: {:.1}MB",
                 downloaded as f64 / (1024.0 * 1024.0)
-            )));
+            );
         }
     }
     drop(ffmpeg_stdin);
@@ -354,7 +348,7 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
         100.0,
         &progress.elapsed(),
     )));
-    let _ = tx.send(DownloadEvent::Log("ダウンロード進捗: 100.0%".to_string()));
+    crate::log_info!(Download, "ダウンロード進捗: 100.0%");
     progress.set_post_processing();
     let _ = tx.send(DownloadEvent::Progress(ProgressUpdate::post_processing(
         &progress.elapsed(),
@@ -375,7 +369,7 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
         100.0,
         &progress.elapsed(),
     )));
-    let _ = tx.send(DownloadEvent::Log("ffmpeg変換が完了しました。".to_string()));
+    crate::log_info!(Download, "ffmpeg変換が完了しました。");
     Ok(())
 }
 
@@ -463,7 +457,15 @@ fn handle_ffmpeg_conversion_line(
         }
     }
 
-    let _ = tx.send(DownloadEvent::Log(trimmed.to_string()));
+    // 強制終了させた ffmpeg の終了エラーは記録しない。
+    if progress.is_cancelling() {
+        return;
+    }
+    crate::logs::emit(
+        crate::logs::classify_tool_line(trimmed),
+        crate::logs::Source::Download,
+        trimmed,
+    );
 }
 
 fn parse_ffmpeg_time_seconds(line: &str) -> Option<f64> {
@@ -517,31 +519,24 @@ fn ensure_conversion_encoder(ffmpeg: &Path) -> Result<(), String> {
 }
 
 // API 取得を優先し、失敗時は HTML 解析で直リンクを探す。
-fn fetch_animethemes_direct_webm(
-    url: &str,
-    tx: &mpsc::Sender<DownloadEvent>,
-) -> Result<Option<String>, String> {
-    if let Some(webm_url) = fetch_animethemes_webm_via_api(url, tx)? {
+fn fetch_animethemes_direct_webm(url: &str) -> Result<Option<String>, String> {
+    if let Some(webm_url) = fetch_animethemes_webm_via_api(url)? {
         return Ok(Some(webm_url));
     }
-    fetch_animethemes_webm_via_html(url, tx)
+    fetch_animethemes_webm_via_html(url)
 }
 
 // ストリーム再生でもダウンロードと同じ解決ロジックを利用する。
-// ログの受信側は不要だが、既存パイプラインと挙動を揃えるため内部チャネルへ流す。
 pub(crate) fn resolve_direct_webm(url: &str) -> Result<Option<String>, String> {
-    let (tx, _rx) = mpsc::channel();
-    fetch_animethemes_direct_webm(url, &tx)
+    fetch_animethemes_direct_webm(url)
 }
 
-fn fetch_animethemes_webm_via_api(
-    page_url: &str,
-    tx: &mpsc::Sender<DownloadEvent>,
-) -> Result<Option<String>, String> {
+fn fetch_animethemes_webm_via_api(page_url: &str) -> Result<Option<String>, String> {
     let Some((anime_slug, theme_slug)) = parse_animethemes_page_slugs(page_url) else {
-        let _ = tx.send(DownloadEvent::Log(
-            "AnimeThemes URL解析に失敗。HTML解析へフォールバックします。".to_string(),
-        ));
+        crate::log_warn!(
+            Download,
+            "AnimeThemes URL解析に失敗。HTML解析へフォールバックします。"
+        );
         return Ok(None);
     };
 
@@ -568,10 +563,11 @@ fn fetch_animethemes_webm_via_api(
             .map_err(|err| format!("AnimeThemes API取得に失敗しました: {err}"))?;
 
         if !output.status.success() {
-            let _ = tx.send(DownloadEvent::Log(format!(
+            crate::log_warn!(
+                Download,
                 "AnimeThemes API取得に失敗しました: {} ({api_url})",
                 output.status
-            )));
+            );
             continue;
         }
 
@@ -580,25 +576,23 @@ fn fetch_animethemes_webm_via_api(
             Ok(Some(webm_url)) => return Ok(Some(webm_url)),
             Ok(None) => continue,
             Err(reason) => {
-                let _ = tx.send(DownloadEvent::Log(format!(
+                crate::log_warn!(
+                    Download,
                     "AnimeThemes APIレスポンス解析に失敗しました: {reason} ({api_url})"
-                )));
+                );
                 continue;
             }
         }
     }
 
-    let _ = tx.send(DownloadEvent::Log(
+    crate::log_warn!(
+        Download,
         "AnimeThemes APIに対象テーマの直リンクがありません。HTML解析へフォールバックします。"
-            .to_string(),
-    ));
+    );
     Ok(None)
 }
 
-fn fetch_animethemes_webm_via_html(
-    url: &str,
-    tx: &mpsc::Sender<DownloadEvent>,
-) -> Result<Option<String>, String> {
+fn fetch_animethemes_webm_via_html(url: &str) -> Result<Option<String>, String> {
     let range_output = Command::new("curl")
         .arg("-sL")
         .arg("-m")
@@ -612,10 +606,11 @@ fn fetch_animethemes_webm_via_html(
         .map_err(|err| format!("curl起動に失敗しました: {err}"))?;
 
     if !range_output.status.success() {
-        let _ = tx.send(DownloadEvent::Log(format!(
+        crate::log_warn!(
+            Download,
             "AnimeThemesページ取得に失敗しました: {}",
             range_output.status
-        )));
+        );
         return Ok(None);
     }
 
@@ -624,10 +619,10 @@ fn fetch_animethemes_webm_via_html(
         return Ok(Some(webm_url));
     }
 
-    let _ = tx.send(DownloadEvent::Log(
+    crate::log_info!(
+        Download,
         "AnimeThemes HTML部分取得では直リンクが見つかりません。全文取得で再試行します。"
-            .to_string(),
-    ));
+    );
     let full_output = Command::new("curl")
         .arg("-sL")
         .arg("-m")
@@ -639,10 +634,11 @@ fn fetch_animethemes_webm_via_html(
         .map_err(|err| format!("curl起動に失敗しました: {err}"))?;
 
     if !full_output.status.success() {
-        let _ = tx.send(DownloadEvent::Log(format!(
+        crate::log_warn!(
+            Download,
             "AnimeThemesページ全文取得に失敗しました: {}",
             full_output.status
-        )));
+        );
         return Ok(None);
     }
 

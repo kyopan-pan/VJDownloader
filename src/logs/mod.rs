@@ -20,6 +20,9 @@ pub enum Level {
 }
 
 impl Level {
+    /// 表示順（低い重大度から）。フィルタの選択肢に使う。
+    pub const ALL: [Level; 4] = [Level::Debug, Level::Info, Level::Warn, Level::Error];
+
     /// OpenTelemetry の SeverityNumber。各レンジの下端（DEBUG=5 / INFO=9 / WARN=13 / ERROR=17）を使う。
     pub fn severity_number(self) -> u8 {
         match self {
@@ -50,9 +53,22 @@ pub enum Source {
     Download,
     Convert,
     Search,
+    Stream,
+    SpeedTest,
 }
 
 impl Source {
+    /// フィルタの選択肢に使う。
+    pub const ALL: [Source; 7] = [
+        Source::App,
+        Source::Setup,
+        Source::Download,
+        Source::Convert,
+        Source::Search,
+        Source::Stream,
+        Source::SpeedTest,
+    ];
+
     pub fn scope_name(self) -> &'static str {
         match self {
             Source::App => "app",
@@ -60,6 +76,8 @@ impl Source {
             Source::Download => "download",
             Source::Convert => "convert",
             Source::Search => "search",
+            Source::Stream => "stream",
+            Source::SpeedTest => "speedtest",
         }
     }
 }
@@ -79,7 +97,7 @@ impl LogEntry {
     /// ファイル出力用の1行。
     pub fn file_line(&self) -> String {
         format!(
-            "{}  {:<9}  {:<8}  {}",
+            "{}  {:<9}  {:<9}  {}",
             format_timestamp(self.at),
             format!(
                 "{}({})",
@@ -94,12 +112,40 @@ impl LogEntry {
     /// ログ画面用の1行。日付はウィンドウの幅を食うため省き、等幅フォントで桁が揃う幅に整える。
     pub fn display_line(&self) -> String {
         format!(
-            "{}  {:<5}  {:<8}  {}",
+            "{}  {:<5}  {:<9}  {}",
             format_time_of_day(self.at),
             self.level.severity_text(),
             self.source.scope_name(),
             self.body
         )
+    }
+}
+
+/// ログ画面の絞り込み条件。表示とクリップボードへのコピーで同じ条件を使う。
+#[derive(Clone, Copy, Debug)]
+pub struct LogFilter {
+    /// この重大度以上だけを通す。
+    pub min_level: Level,
+    /// 発生源の指定。None はすべて通す。
+    pub source: Option<Source>,
+}
+
+impl Default for LogFilter {
+    fn default() -> Self {
+        // 既定では DEBUG（外部ツールの生出力）まで含め、これまでの表示内容を変えない。
+        Self {
+            min_level: Level::Debug,
+            source: None,
+        }
+    }
+}
+
+impl LogFilter {
+    pub fn matches(&self, entry: &LogEntry) -> bool {
+        if entry.level.severity_number() < self.min_level.severity_number() {
+            return false;
+        }
+        self.source.is_none_or(|source| source == entry.source)
     }
 }
 
@@ -114,6 +160,19 @@ pub fn format_timestamp(at: OffsetDateTime) -> String {
 fn format_time_of_day(at: OffsetDateTime) -> String {
     at.format(&format_description!("[hour]:[minute]:[second]"))
         .unwrap_or_else(|_| "00:00:00".to_string())
+}
+
+/// 本文を1行へ畳む。ffmpegの標準エラー出力やパニックの内容は複数行になるため、
+/// そのまま書くと「1レコード=1行」が崩れてログファイルの行単位の読み取りができなくなる。
+fn one_line(body: String) -> String {
+    if !body.contains('\n') && !body.contains('\r') {
+        return body;
+    }
+    body.lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\\n")
 }
 
 /// ローカル時刻。タイムゾーンを取得できない環境ではUTCへ倒す。
@@ -153,7 +212,7 @@ pub fn init() -> Arc<Mutex<AppLogger>> {
 
 /// ログを1件記録する。呼び出し側はロガーの参照を持たず、マクロ経由でここへ集約する。
 pub fn emit(level: Level, source: Source, body: impl Into<String>) {
-    let body = body.into();
+    let body = one_line(body.into());
     if body.is_empty() {
         return;
     }
@@ -187,7 +246,7 @@ pub fn emit_panic(body: impl Into<String>) {
         at: now_local(),
         level: Level::Error,
         source: Source::App,
-        body: body.into(),
+        body: one_line(body.into()),
     };
     if let Some(tx) = HUB.get().and_then(|hub| hub.file_tx.as_ref()) {
         let _ = tx.send(entry);
@@ -210,6 +269,17 @@ macro_rules! log_warn {
     ($source:ident, $($arg:tt)*) => {
         $crate::logs::emit(
             $crate::logs::Level::Warn,
+            $crate::logs::Source::$source,
+            ::std::format!($($arg)*),
+        )
+    };
+}
+
+#[macro_export]
+macro_rules! log_debug {
+    ($source:ident, $($arg:tt)*) => {
+        $crate::logs::emit(
+            $crate::logs::Level::Debug,
             $crate::logs::Source::$source,
             ::std::format!($($arg)*),
         )
@@ -257,6 +327,18 @@ mod tests {
         );
         assert!(line.contains("ERROR(17)"), "重大度が欠けている: {line}");
         assert!(line.contains("download"), "発生源が欠けている: {line}");
+    }
+
+    #[test]
+    fn multiline_bodies_are_folded_into_one_line() {
+        // パニックやffmpegの標準エラー出力は複数行になる。1レコード=1行を崩さないこと。
+        let folded = one_line("panicked at src/app.rs:1:1:\n検証用のパニック".to_string());
+        assert_eq!(folded, "panicked at src/app.rs:1:1:\\n検証用のパニック");
+        assert!(!folded.contains('\n'), "改行が残っている");
+        // 空行と行末の空白は落とす。
+        assert_eq!(one_line("a  \r\n\n b".to_string()), "a\\n b");
+        // 単一行はそのまま返す。
+        assert_eq!(one_line("そのまま".to_string()), "そのまま");
     }
 
     #[test]

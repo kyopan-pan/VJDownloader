@@ -472,10 +472,10 @@ impl SearchEngine {
         thread::spawn(move || {
             let result = scan_root(root_id, &root_path, &db_path, &write_tx);
             if let Err(err) = &result {
-                eprintln!(
-                    "[search-index] full scan failed for {}: {}",
-                    root_path.to_string_lossy(),
-                    err
+                crate::log_error!(
+                    Search,
+                    "フォルダの全走査に失敗しました: {} ({err})",
+                    root_path.to_string_lossy()
                 );
             }
             engine.notify_index_event(IndexEvent::UpdateFinished { target, result });

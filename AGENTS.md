@@ -13,7 +13,7 @@
 
 ```bash
 cargo check                      # 型チェック（既定フィーチャー: syphon 有効）
-cargo test                       # 全テスト（56件）
+cargo test                       # 全テスト（59件）
 cargo test search_index -- --test-threads=1   # 検索インデックスのみ直列実行
 cargo clippy --all-targets       # lint
 cargo fmt                        # 整形

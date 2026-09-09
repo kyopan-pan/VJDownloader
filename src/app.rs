@@ -259,15 +259,15 @@ impl DownloaderApp {
 
         // ロガーはグローバルな集約点を参照するため、スレッドへ参照を渡す必要がない。
         thread::spawn(move || {
-            if let Err(err) = ensure_yt_dlp(None) {
+            if let Err(err) = ensure_yt_dlp() {
                 log_error!(Setup, "yt-dlpのセットアップに失敗しました: {err}");
             }
-            if let Err(err) = ensure_deno(None) {
+            if let Err(err) = ensure_deno() {
                 log_error!(Setup, "Denoのセットアップに失敗しました: {err}");
             }
             // Windowsではffmpeg/ffprobeも取得対象になる。
             #[cfg(target_os = "windows")]
-            if let Err(err) = crate::download::ensure_ffmpeg_tools(None) {
+            if let Err(err) = crate::download::ensure_ffmpeg_tools() {
                 log_error!(Setup, "ffmpeg/ffprobeのセットアップに失敗しました: {err}");
             }
         });
@@ -403,7 +403,8 @@ impl DownloaderApp {
             }
         }
 
-        // キャンセルで強制終了したプロセスが吐く終了エラー出力はログに残さない。
+        // キャンセルで強制終了したプロセスが出すBot対策相当の通知は無視する。
+        // 外部ツールの出力ログ自体は送出側（ProgressContext::is_cancelling）で抑制している。
         let cancelling = self
             .cancel_flag
             .as_ref()
@@ -412,16 +413,6 @@ impl DownloaderApp {
         let mut done = None;
         for event in events {
             match event {
-                DownloadEvent::Log(line) => {
-                    if !cancelling {
-                        // yt-dlp / ffmpeg の生出力なので、行の慣習からレベルを推定する。
-                        logs::emit(
-                            logs::classify_tool_line(&line),
-                            logs::Source::Download,
-                            line,
-                        );
-                    }
-                }
                 DownloadEvent::Progress(update) => self.handle_progress_update(update),
                 DownloadEvent::Guard(notice) => {
                     if !cancelling {
@@ -475,15 +466,6 @@ impl DownloaderApp {
                 }
                 ConversionEvent::Failed(error) => {
                     log_error!(Convert, "MP4変換に失敗しました: {error}");
-                }
-                // ffmpegの生出力は件数が多く、追跡の手掛かりとしては細かいためDEBUG扱いにする。
-                ConversionEvent::Log(line) => {
-                    let level = if line.starts_with("[ffmpeg]") {
-                        logs::Level::Debug
-                    } else {
-                        logs::classify_tool_line(&line)
-                    };
-                    logs::emit(level, logs::Source::Convert, line);
                 }
             }
         }

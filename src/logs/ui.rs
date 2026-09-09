@@ -5,7 +5,7 @@ use time::Duration;
 use std::sync::{Arc, Mutex};
 
 use crate::cursor::pointing;
-use crate::logs::{AppLogger, Level, file};
+use crate::logs::{AppLogger, Level, LogFilter, Source, file};
 use crate::theme::paint_viewport_background;
 
 /// フッターのボタン文字サイズ。ボタン行の高さ計算と描画で同じ値を使う。
@@ -28,11 +28,16 @@ fn level_color(level: Level) -> egui::Color32 {
 
 pub struct LogUiState {
     pub show_logs: bool,
+    /// ログ画面の絞り込み条件。ウィンドウを閉じても保持する。
+    pub filter: LogFilter,
 }
 
 impl LogUiState {
     pub fn new() -> Self {
-        Self { show_logs: false }
+        Self {
+            show_logs: false,
+            filter: LogFilter::default(),
+        }
     }
 
     pub fn open_logs(&mut self) {
@@ -59,7 +64,8 @@ pub fn render_log_viewport(
     let builder = egui::ViewportBuilder::default()
         .with_title("ログ")
         .with_inner_size(egui::vec2(760.0, 460.0))
-        .with_min_inner_size(egui::vec2(520.0, 280.0))
+        // 絞り込み行を含めた固定部分がおよそ303pxあるため、それを下回らない高さを最小とする。
+        .with_min_inner_size(egui::vec2(520.0, 320.0))
         .with_always_on_top();
 
     let state = Arc::clone(state);
@@ -72,17 +78,29 @@ pub fn render_log_viewport(
             }
             return;
         }
-        render_log_contents(ui, &logs);
+        render_log_contents(ui, &state, &logs);
     });
+}
+
+/// 発生源の選択肢の表示名。`None` は絞り込みなし。
+fn source_label(source: Option<Source>) -> &'static str {
+    match source {
+        None => "すべて",
+        Some(source) => source.scope_name(),
+    }
 }
 
 fn render_log_contents(
     // ログ画面の描画先
     ui: &mut egui::Ui,
+    state: &Arc<Mutex<LogUiState>>,
     logs: &Arc<Mutex<AppLogger>>,
 ) {
     let mut copy_clicked = false;
     let mut clear_clicked = false;
+    // ロックを描画中ずっと保持しないよう、条件は先に取り出して最後に書き戻す。
+    let mut filter = state.lock().map(|state| state.filter).unwrap_or_default();
+    let initial_filter = filter;
     egui::Frame::NONE
         .inner_margin(egui::Margin {
             left: 12,
@@ -97,6 +115,59 @@ fn render_log_contents(
                     .strong()
                     .color(egui::Color32::from_rgb(226, 232, 240)),
             );
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("最小レベル")
+                        .size(FOOTER_TEXT_SIZE)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                egui::ComboBox::from_id_salt("log_min_level")
+                    .selected_text(
+                        egui::RichText::new(filter.min_level.severity_text())
+                            .size(FOOTER_TEXT_SIZE)
+                            .color(level_color(filter.min_level)),
+                    )
+                    .show_ui(ui, |ui| {
+                        for level in Level::ALL {
+                            ui.selectable_value(
+                                &mut filter.min_level,
+                                level,
+                                egui::RichText::new(level.severity_text())
+                                    .size(FOOTER_TEXT_SIZE)
+                                    .color(level_color(level)),
+                            );
+                        }
+                    });
+
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("発生源")
+                        .size(FOOTER_TEXT_SIZE)
+                        .color(egui::Color32::from_rgb(148, 163, 184)),
+                );
+                egui::ComboBox::from_id_salt("log_source")
+                    .selected_text(
+                        egui::RichText::new(source_label(filter.source))
+                            .size(FOOTER_TEXT_SIZE)
+                            .color(egui::Color32::from_rgb(226, 232, 240)),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut filter.source,
+                            None,
+                            egui::RichText::new(source_label(None)).size(FOOTER_TEXT_SIZE),
+                        );
+                        for source in Source::ALL {
+                            ui.selectable_value(
+                                &mut filter.source,
+                                Some(source),
+                                egui::RichText::new(source.scope_name()).size(FOOTER_TEXT_SIZE),
+                            );
+                        }
+                    });
+            });
             ui.add_space(8.0);
 
             // ボタン行の高さはテーマのボタン余白とフォント高で決まる。固定値で見積もると
@@ -122,17 +193,24 @@ fn render_log_contents(
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             let Ok(logs) = logs.lock() else { return };
-                            if logs.is_empty() {
+                            let mut visible = logs.entries().filter(|entry| filter.matches(entry));
+                            let Some(first) = visible.next() else {
                                 ui.add_space(4.0);
+                                let message = if logs.is_empty() {
+                                    "ログはまだありません。"
+                                } else {
+                                    "条件に一致するログがありません。"
+                                };
                                 ui.label(
-                                    egui::RichText::new("ログはまだありません。")
+                                    egui::RichText::new(message)
                                         .size(12.0)
                                         .color(egui::Color32::from_rgb(148, 163, 184)),
                                 );
                                 return;
-                            }
+                            };
 
-                            for (index, entry) in logs.entries().enumerate() {
+                            for (index, entry) in std::iter::once(first).chain(visible).enumerate()
+                            {
                                 let fill = if index % 2 == 1 {
                                     egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6)
                                 } else {
@@ -199,10 +277,17 @@ fn render_log_contents(
         logs.clear();
     }
 
+    // 変更があったときだけ書き戻し、無駄なロック取得を避ける。
+    if (filter.min_level != initial_filter.min_level || filter.source != initial_filter.source)
+        && let Ok(mut state) = state.lock()
+    {
+        state.filter = filter;
+    }
+
     if copy_clicked {
         let snapshot = logs
             .lock()
-            .map(|logs| logs.build_recent_snapshot(COPY_WINDOW))
+            .map(|logs| logs.build_recent_snapshot(COPY_WINDOW, &filter))
             .unwrap_or_default();
         if let Err(err) = copy_to_clipboard(&snapshot) {
             crate::log_error!(App, "ログのコピーに失敗しました: {err}");
@@ -243,6 +328,8 @@ mod tests {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
 
+        let state = Arc::new(Mutex::new(LogUiState::new()));
+
         let logs = Arc::new(Mutex::new(AppLogger::new()));
         if let Ok(mut logs) = logs.lock() {
             for index in 0..log_lines {
@@ -264,7 +351,7 @@ mod tests {
             used_bottom = 0.0;
             let _ = ctx.run_ui(input.clone(), |ui| {
                 egui::Frame::NONE.show(ui, |ui| {
-                    render_log_contents(ui, &logs);
+                    render_log_contents(ui, &state, &logs);
                     // ui.max_rect() は内容に合わせて広がるため、ウィンドウ高と直接比べる。
                     used_bottom = ui.min_rect().bottom();
                 });
@@ -298,7 +385,7 @@ mod tests {
     #[test]
     fn footer_keeps_margin_from_window_bottom() {
         // ボタン行の高さを固定値で見積もると下端へ張り付くため、余白が残ることを確認する。
-        for (height, lines) in [(460.0, 0), (460.0, 200), (280.0, 0), (900.0, 5)] {
+        for (height, lines) in [(460.0, 0), (460.0, 200), (320.0, 0), (900.0, 5)] {
             let used_bottom = content_bottom(height, lines);
             assert!(
                 used_bottom <= height,
