@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::paths::ffmpeg_path;
+use crate::platform::process::hidden_command;
 use crate::theme::paint_viewport_background;
 
 #[derive(Debug)]
@@ -401,7 +402,7 @@ pub(crate) fn default_mp4_command(
     output: &Path,
     use_videotoolbox: bool,
 ) -> Command {
-    let mut command = Command::new(ffmpeg);
+    let mut command = hidden_command(ffmpeg);
     command
         .arg("-hide_banner")
         .arg("-nostdin")

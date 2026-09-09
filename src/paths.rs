@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
-use std::{fs::File, io::Read, process::Command};
+use std::{fs::File, io::Read};
+
+#[cfg(target_os = "windows")]
+use crate::platform::process::hidden_command;
 
 pub fn default_download_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -144,7 +147,7 @@ fn is_usable_windows_media_tool(path: &std::path::Path) -> bool {
         .is_ok()
         && signature == *b"MZ";
     has_pe_signature
-        && Command::new(path)
+        && hidden_command(path)
             .arg("-version")
             .output()
             .map(|output| output.status.success())

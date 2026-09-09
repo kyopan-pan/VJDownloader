@@ -3,12 +3,12 @@ use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::converter::h264_encoder;
 use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{bin_dir, deno_path, executable_name, yt_dlp_path};
+use crate::platform::process::hidden_command;
 
 use super::DownloadMode;
 
@@ -305,7 +305,7 @@ fn verify_staged_tool(path: &Path, label: &str) -> Result<(), String> {
 
     ensure_executable(path)?;
 
-    let output = Command::new(path)
+    let output = hidden_command(path)
         .arg(tool_version_arg(label))
         .output()
         .map_err(|err| format!("{label}の起動確認に失敗しました: {err}"))?;
@@ -600,7 +600,7 @@ fn ensure_executable(path: &Path) -> Result<(), String> {
 }
 
 fn curl_download(url: &str, output_path: &Path, label: &str) -> Result<(), String> {
-    let status = Command::new("curl")
+    let status = hidden_command("curl")
         .arg("-L")
         // HTTPエラー応答を成果物として保存しないよう失敗扱いにする。
         .arg("--fail")
@@ -626,14 +626,14 @@ fn curl_download(url: &str, output_path: &Path, label: &str) -> Result<(), Strin
 
 fn extract_tool_zip(zip_path: &Path, destination: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let output = Command::new("powershell.exe")
+    let output = hidden_command("powershell.exe")
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
             "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:VJDL_ZIP_PATH, $env:VJDL_ZIP_DEST)"])
         .env("VJDL_ZIP_PATH", zip_path)
         .env("VJDL_ZIP_DEST", destination)
         .output();
     #[cfg(not(target_os = "windows"))]
-    let output = Command::new("unzip")
+    let output = hidden_command("unzip")
         .arg("-o")
         .arg(zip_path)
         .arg("-d")
@@ -657,7 +657,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        MIN_TOOL_BYTES, common_yt_dlp_args, install_tool_staged, is_usable_tool,
+        MIN_TOOL_BYTES, common_yt_dlp_args, hidden_command, install_tool_staged, is_usable_tool,
         previous_version_paths, replace_tool, restore_interrupted_update, tool_version_arg,
         verify_staged_tool,
     };
@@ -681,7 +681,7 @@ mod tests {
 
         replace_tool(&staged, &target, "yt-dlp").unwrap();
 
-        let output = std::process::Command::new(&target).output().unwrap();
+        let output = hidden_command(&target).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "new");
         assert!(previous_version_paths(&target).is_empty());
     }
@@ -718,7 +718,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(is_usable_tool(&target));
-        let output = std::process::Command::new(&target).output().unwrap();
+        let output = hidden_command(&target).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "old");
     }
 
@@ -774,7 +774,7 @@ mod windows_setup_tests {
         let source = dir.join("deno.exe");
         fs::write(&source, b"zip extraction fixture").unwrap();
         let zip = temp.path().join("test.zip");
-        let status = Command::new("powershell.exe")
+        let status = hidden_command("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command",
                 "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:VJDL_TEST_SOURCE, $env:VJDL_TEST_ZIP)"])
             .env("VJDL_TEST_SOURCE", &dir).env("VJDL_TEST_ZIP", &zip)

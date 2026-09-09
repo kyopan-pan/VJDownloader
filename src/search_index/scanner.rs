@@ -2,13 +2,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use walkdir::WalkDir;
 
 use crate::paths::ffprobe_path;
+use crate::platform::process::hidden_command;
 
 use super::db::open_connection;
 use super::normalize::{
@@ -311,7 +311,7 @@ fn load_cached_files(db_path: &Path, root_id: i64) -> EngineResult<HashMap<Strin
 
 // ffprobeからコメント系タグを取得する。タグ名の大文字・小文字は区別しない。
 fn read_search_comment(path: &Path) -> EngineResult<String> {
-    let output = Command::new(ffprobe_path())
+    let output = hidden_command(ffprobe_path())
         .arg("-v")
         .arg("error")
         .arg("-show_entries")

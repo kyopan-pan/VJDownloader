@@ -11,6 +11,7 @@ use crate::converter::{
     libx264_retry_available, truncate_error,
 };
 use crate::paths::bin_dir;
+use crate::platform::process::hidden_command;
 
 use super::guard;
 use super::{CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressContext, ProgressUpdate};
@@ -39,7 +40,7 @@ fn run_pipe_to_ffmpeg(
 
     spawn_stream_thread(producer_child.stderr.take(), tx, progress);
 
-    let mut ffmpeg_cmd = Command::new(ffmpeg);
+    let mut ffmpeg_cmd = hidden_command(ffmpeg);
     ffmpeg_cmd
         .arg("-loglevel")
         .arg("error")
@@ -217,7 +218,7 @@ pub(super) fn run_yt_dlp(
     add_bin_to_path: bool,
     tracker: &ProcessTracker,
 ) -> Result<std::process::ExitStatus, String> {
-    let mut command = Command::new(yt_dlp_path);
+    let mut command = hidden_command(yt_dlp_path);
     command
         .args(args)
         .stdout(Stdio::piped())

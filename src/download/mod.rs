@@ -7,7 +7,7 @@ mod tools;
 use arboard::Clipboard;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use crate::bundled::ensure_bundled_tools;
 use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{ffmpeg_path, yt_dlp_path};
+use crate::platform::process::hidden_command;
 
 pub use guard::{BotGuardState, GuardNotice, is_youtube_url};
 pub use tools::{ensure_deno, ensure_yt_dlp, js_runtime_arg, update_deno, update_yt_dlp};
@@ -317,13 +318,13 @@ fn terminate_pids(pids: Vec<u32>) {
     // 先に SIGCONT で再開させてから SIGTERM で穏やかに終了を促す。ffmpeg はこの過程で
     // audiotoolbox 出力のオーディオキューを正常に停止・破棄するため、停止直後の音声ループを防げる。
     for pid in &pids {
-        let _ = Command::new("kill")
+        let _ = hidden_command("kill")
             .arg("-CONT")
             .arg(pid.to_string())
             .status();
     }
     for pid in &pids {
-        let _ = Command::new("kill")
+        let _ = hidden_command("kill")
             .arg("-TERM")
             .arg(pid.to_string())
             .status();
@@ -334,7 +335,7 @@ fn terminate_pids(pids: Vec<u32>) {
     thread::spawn(move || {
         for pid in &pids {
             if !wait_for_exit(*pid, Duration::from_millis(2000)) {
-                let _ = Command::new("kill")
+                let _ = hidden_command("kill")
                     .arg("-KILL")
                     .arg(pid.to_string())
                     .status();
@@ -348,7 +349,7 @@ fn terminate_pids(pids: Vec<u32>) {
 fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        let alive = Command::new("kill")
+        let alive = hidden_command("kill")
             .arg("-0")
             .arg(pid.to_string())
             .status()

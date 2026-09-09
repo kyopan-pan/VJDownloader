@@ -5,9 +5,11 @@
 // - file_dialog  : 実装済み（IFileOpenDialog）
 // - input_source : 実装済み（GetKeyboardLayout + IMM32）
 // - menu         : フラグ受け渡しのみ実装。アプリ内メニュー UI の追加が未完（TODO(windows) 参照）
+// - process      : 実装済み（子プロセスへ CREATE_NO_WINDOW を付与）
 // - window       : Windows では処理不要のため恒久的に no-op
 
 pub mod file_dialog;
 pub mod input_source;
 pub mod menu;
+pub mod process;
 pub mod window;

@@ -16,6 +16,7 @@ use url::Url;
 use crate::download::{ProcessTracker, js_runtime_arg};
 use crate::fs_utils::is_executable;
 use crate::paths::{bin_dir, ffmpeg_path, yt_dlp_path};
+use crate::platform::process::hidden_command;
 
 // デコード解像度（固定サイズの生RGBAフレーム）。
 // Syphon 出力時はマスターを高解像度で配信するため 1280x720、通常は軽量な 480x270。
@@ -157,7 +158,7 @@ fn cache_media(
     }
 
     let yt_dlp = yt_dlp_path();
-    let mut cmd = Command::new(&yt_dlp);
+    let mut cmd = hidden_command(&yt_dlp);
     cmd.arg("--no-playlist")
         .arg("--encoding")
         .arg("utf-8")
@@ -263,7 +264,7 @@ fn resolve_media(
     }
 
     crate::log_debug!(Stream, "yt-dlpでURL解決を開始します: {url}");
-    let mut cmd = Command::new(&yt_dlp);
+    let mut cmd = hidden_command(&yt_dlp);
     cmd.arg("--no-playlist").arg("--encoding").arg("utf-8");
     cmd.args(cookie_args);
     cmd.args([
@@ -539,7 +540,7 @@ fn build_ffmpeg_command(
     );
     let offset = format!("{start_offset:.3}");
 
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = hidden_command(ffmpeg);
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")

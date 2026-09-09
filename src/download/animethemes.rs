@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -10,6 +10,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::converter::h264_encoder;
+use crate::platform::process::hidden_command;
 
 use super::process::{run_pipe_to_ffmpeg_or_cancel, spawn_stream_thread, terminate_child_process};
 use super::{CANCELLED_ERROR, DownloadEvent, ProcessTracker, ProgressContext, ProgressUpdate};
@@ -105,7 +106,7 @@ fn run_animethemes_yt_dlp_fallback(
     tracker: &ProcessTracker,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let mut cmd = Command::new(yt_dlp);
+    let mut cmd = hidden_command(yt_dlp);
     cmd.arg("--no-playlist")
         .arg("--encoding")
         .arg("utf-8")
@@ -232,7 +233,7 @@ fn stream_animethemes_webm_to_mp4_with_gpu(
         h264_encoder()
     );
 
-    let mut ffmpeg_cmd = Command::new(ffmpeg);
+    let mut ffmpeg_cmd = hidden_command(ffmpeg);
     ffmpeg_cmd
         .arg("-stats")
         .arg("-analyzeduration")
@@ -495,7 +496,7 @@ fn ensure_conversion_encoder(ffmpeg: &Path) -> Result<(), String> {
             "Apple Silicon環境のみ対応です。h264_videotoolbox(GPU)が必須です。".to_string(),
         );
     }
-    let output = Command::new(ffmpeg)
+    let output = hidden_command(ffmpeg)
         .arg("-hide_banner")
         .arg("-encoders")
         .output()
@@ -550,7 +551,7 @@ fn fetch_animethemes_webm_via_api(page_url: &str) -> Result<Option<String>, Stri
     ];
 
     for api_url in api_urls {
-        let output = Command::new("curl")
+        let output = hidden_command("curl")
             .arg("-sL")
             .arg("-m")
             .arg("8")
@@ -593,7 +594,7 @@ fn fetch_animethemes_webm_via_api(page_url: &str) -> Result<Option<String>, Stri
 }
 
 fn fetch_animethemes_webm_via_html(url: &str) -> Result<Option<String>, String> {
-    let range_output = Command::new("curl")
+    let range_output = hidden_command("curl")
         .arg("-sL")
         .arg("-m")
         .arg("8")
@@ -623,7 +624,7 @@ fn fetch_animethemes_webm_via_html(url: &str) -> Result<Option<String>, String> 
         Download,
         "AnimeThemes HTML部分取得では直リンクが見つかりません。全文取得で再試行します。"
     );
-    let full_output = Command::new("curl")
+    let full_output = hidden_command("curl")
         .arg("-sL")
         .arg("-m")
         .arg("8")
