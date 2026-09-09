@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 #[cfg(target_os = "windows")]
-use std::{fs::File, io::Read, process::Command};
+use std::{fs::File, io::Read};
+
+#[cfg(target_os = "windows")]
+use crate::platform::process::hidden_command;
 
 pub fn default_download_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -19,6 +22,25 @@ pub fn settings_dir() -> PathBuf {
 
 pub fn settings_file_path() -> PathBuf {
     settings_dir().join("settings.properties")
+}
+
+// ログファイルの保存先。設定や検索DBと違いOSの規約側へ置く。macOSは Console.app が拾える
+// `~/Library/Logs`、Windowsはマシン間で漫遊させない `%LOCALAPPDATA%` 配下を使い、
+// ユーザーが自力でログへ到達できるようにする。
+pub fn log_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        home.join("Library").join("Logs").join("VJDownloader")
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        dirs::data_local_dir()
+            .unwrap_or_else(app_data_dir)
+            .join("VJDownloader")
+            .join("logs")
+    }
 }
 
 pub fn search_index_db_path() -> PathBuf {
@@ -125,7 +147,7 @@ fn is_usable_windows_media_tool(path: &std::path::Path) -> bool {
         .is_ok()
         && signature == *b"MZ";
     has_pe_signature
-        && Command::new(path)
+        && hidden_command(path)
             .arg("-version")
             .output()
             .map(|output| output.status.success())

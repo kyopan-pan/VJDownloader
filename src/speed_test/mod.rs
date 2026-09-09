@@ -1,10 +1,10 @@
 use eframe::egui;
-use std::process::Command;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Instant;
 
 use crate::cursor::pointing;
+use crate::platform::process::hidden_command;
 use crate::theme::paint_viewport_background;
 
 const TEST_URL: &str = "https://speed.cloudflare.com/__down?bytes=50000000";
@@ -75,10 +75,16 @@ impl SpeedTestUiState {
                     self.started_at = None;
                     match result {
                         Ok(result) => {
+                            crate::log_info!(
+                                SpeedTest,
+                                "通信速度を測定しました: 下り{:.1}Mbps",
+                                result.download_mbps
+                            );
                             self.result = Some(result);
                             self.error = None;
                         }
                         Err(err) => {
+                            crate::log_error!(SpeedTest, "通信速度の測定に失敗しました: {err}");
                             self.result = None;
                             self.error = Some(err);
                         }
@@ -287,7 +293,7 @@ fn render_indeterminate_bar(ui: &mut egui::Ui, ctx: &egui::Context) {
 }
 
 fn run_download_speed_test() -> Result<SpeedTestResult, String> {
-    let output = Command::new("curl")
+    let output = hidden_command("curl")
         .arg("-L")
         .arg("--silent")
         .arg("--show-error")

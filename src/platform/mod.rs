@@ -43,6 +43,10 @@ pub mod menu {
     };
 }
 
+pub mod process {
+    pub use super::imp::process::hidden_command;
+}
+
 pub mod window {
     pub use super::imp::window::{
         apply_app_icon_from_icns, enable_mouse_move_events_for_all_windows,

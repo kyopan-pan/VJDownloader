@@ -182,6 +182,7 @@ cargo run                    # 起動
 
 - [docs/spec.md](docs/spec.md) — 仕様
 - [docs/search.md](docs/search.md) — 動画検索周りの設計
+- [docs/release.md](docs/release.md) — ビルド・CI・リリース
 - [AGENTS.md](AGENTS.md) — 開発時の取り決め
 
 ## ライセンス

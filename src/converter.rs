@@ -7,16 +7,16 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::paths::ffmpeg_path;
+use crate::platform::process::hidden_command;
 use crate::theme::paint_viewport_background;
 
 #[derive(Debug)]
 pub enum ConversionEvent {
     Completed(PathBuf),
     Failed(String),
-    Log(String),
 }
 
 struct FfmpegOutput {
@@ -288,13 +288,10 @@ fn start_conversion_batch(
             }
             ctx.request_repaint_of(viewport_id);
 
-            let _ = event_tx.send(ConversionEvent::Log(format!(
-                "MP4変換を開始します: {}",
-                input.to_string_lossy()
-            )));
+            crate::log_info!(Convert, "MP4変換を開始します: {}", input.to_string_lossy());
             ctx.request_repaint_of(egui::ViewportId::ROOT);
 
-            match convert_to_mp4(&input, &target_dir, &event_tx, &ctx) {
+            match convert_to_mp4(&input, &target_dir, &ctx) {
                 Ok(output) => {
                     completed += 1;
                     last_output = Some(output.clone());
@@ -332,12 +329,7 @@ fn start_conversion_batch(
     });
 }
 
-fn convert_to_mp4(
-    input: &Path,
-    output_dir: &Path,
-    event_tx: &mpsc::Sender<ConversionEvent>,
-    ctx: &egui::Context,
-) -> Result<PathBuf, String> {
+fn convert_to_mp4(input: &Path, output_dir: &Path, ctx: &egui::Context) -> Result<PathBuf, String> {
     fs::create_dir_all(output_dir)
         .map_err(|error| format!("出力先フォルダを作成できませんでした: {error}"))?;
 
@@ -352,15 +344,13 @@ fn convert_to_mp4(
         .ok_or_else(|| "出力ファイル名を作成できませんでした。".to_string())?;
     let temporary = output_dir.join(format!(".{}.converting", file_name.to_string_lossy()));
 
-    let _ = event_tx.send(ConversionEvent::Log(
-        LOG_CONVERT_WITH_VIDEOTOOLBOX.to_string(),
-    ));
-    let mut result = run_ffmpeg_conversion(&ffmpeg, input, &temporary, true, event_tx, ctx)?;
+    crate::log_info!(Convert, "{LOG_CONVERT_WITH_VIDEOTOOLBOX}");
+    let mut result = run_ffmpeg_conversion(&ffmpeg, input, &temporary, true, ctx)?;
     if !result.status.success() && libx264_retry_available() {
         let _ = fs::remove_file(&temporary);
-        let _ = event_tx.send(ConversionEvent::Log(LOG_RETRY_WITH_LIBX264.to_string()));
+        crate::log_warn!(Convert, "{LOG_RETRY_WITH_LIBX264}");
         ctx.request_repaint_of(egui::ViewportId::ROOT);
-        result = run_ffmpeg_conversion(&ffmpeg, input, &temporary, false, event_tx, ctx)?;
+        result = run_ffmpeg_conversion(&ffmpeg, input, &temporary, false, ctx)?;
     }
 
     if !result.status.success() {
@@ -412,7 +402,7 @@ pub(crate) fn default_mp4_command(
     output: &Path,
     use_videotoolbox: bool,
 ) -> Command {
-    let mut command = Command::new(ffmpeg);
+    let mut command = hidden_command(ffmpeg);
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -438,7 +428,6 @@ fn run_ffmpeg_conversion(
     input: &Path,
     output: &Path,
     use_videotoolbox: bool,
-    event_tx: &mpsc::Sender<ConversionEvent>,
     ctx: &egui::Context,
 ) -> Result<FfmpegOutput, String> {
     let mut command = default_mp4_command(ffmpeg, input, output, use_videotoolbox);
@@ -452,7 +441,7 @@ fn run_ffmpeg_conversion(
         .take()
         .ok_or_else(|| "ffmpegのログ出力を取得できませんでした。".to_string())?;
     let mut pending = Vec::new();
-    let mut error_text = String::new();
+    let mut pump = LogPump::default();
     let mut buffer = [0u8; 4096];
 
     loop {
@@ -463,33 +452,60 @@ fn run_ffmpeg_conversion(
             break;
         }
         pending.extend_from_slice(&buffer[..read]);
-        drain_log_lines(&mut pending, false, event_tx, ctx, &mut error_text);
+        drain_log_lines(&mut pending, false, ctx, &mut pump);
     }
-    drain_log_lines(&mut pending, true, event_tx, ctx, &mut error_text);
+    drain_log_lines(&mut pending, true, ctx, &mut pump);
 
     let status = child
         .wait()
         .map_err(|error| format!("ffmpegの終了状態を取得できませんでした: {error}"))?;
     Ok(FfmpegOutput {
         status,
-        stderr: error_text,
+        stderr: pump.error_text,
     })
 }
 
-fn drain_log_lines(
-    pending: &mut Vec<u8>,
-    flush: bool,
-    event_tx: &mpsc::Sender<ConversionEvent>,
-    ctx: &egui::Context,
-    error_text: &mut String,
-) {
+/// ffmpeg の出力を読み進めるあいだの状態。エラー本文の蓄積と stats 行の間引きを持つ。
+#[derive(Default)]
+struct LogPump {
+    error_text: String,
+    last_stats_at: Option<Instant>,
+}
+
+impl LogPump {
+    /// この行をログへ出すかを判定する。`-stats_period 0.5` の stats 行は毎秒2件になり、
+    /// そのまま出すとログ画面の保持件数を数分で使い切って他の記録を押し出してしまうため間引く。
+    fn should_log(&mut self, line: &str) -> bool {
+        if !is_stats_line(line) {
+            return true;
+        }
+        let now = Instant::now();
+        let allow = self
+            .last_stats_at
+            .is_none_or(|last| now.duration_since(last) >= STATS_LOG_INTERVAL);
+        if allow {
+            self.last_stats_at = Some(now);
+        }
+        allow
+    }
+}
+
+/// ffmpeg の stats 行をログへ出す最短間隔。進捗の手応えは残しつつ件数を抑える。
+const STATS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// ffmpeg の stats 行（`frame=... time=...`）かどうか。
+fn is_stats_line(line: &str) -> bool {
+    line.starts_with("frame=") || line.starts_with("size=")
+}
+
+fn drain_log_lines(pending: &mut Vec<u8>, flush: bool, ctx: &egui::Context, pump: &mut LogPump) {
     loop {
         let delimiter = pending
             .iter()
             .position(|byte| *byte == b'\n' || *byte == b'\r');
         let Some(end) = delimiter else {
             if flush && !pending.is_empty() {
-                emit_ffmpeg_log(pending, event_tx, ctx, error_text);
+                emit_ffmpeg_log(pending, ctx, pump);
                 pending.clear();
             }
             return;
@@ -502,29 +518,30 @@ fn drain_log_lines(
             consumed += 1;
         }
         pending.drain(..consumed);
-        emit_ffmpeg_log(&line, event_tx, ctx, error_text);
+        emit_ffmpeg_log(&line, ctx, pump);
     }
 }
 
-fn emit_ffmpeg_log(
-    bytes: &[u8],
-    event_tx: &mpsc::Sender<ConversionEvent>,
-    ctx: &egui::Context,
-    error_text: &mut String,
-) {
+fn emit_ffmpeg_log(bytes: &[u8], ctx: &egui::Context, pump: &mut LogPump) {
     let line = String::from_utf8_lossy(bytes).trim().to_string();
     if line.is_empty() {
         return;
     }
 
+    // 失敗時のエラー本文は間引かず全行を蓄える。原因はstats行の直後に出ることがある。
     const MAX_ERROR_CHARS: usize = 16_000;
-    if error_text.chars().count() < MAX_ERROR_CHARS {
-        if !error_text.is_empty() {
-            error_text.push('\n');
+    if pump.error_text.chars().count() < MAX_ERROR_CHARS {
+        if !pump.error_text.is_empty() {
+            pump.error_text.push('\n');
         }
-        error_text.push_str(&line);
+        pump.error_text.push_str(&line);
     }
-    let _ = event_tx.send(ConversionEvent::Log(format!("[ffmpeg] {line}")));
+
+    if !pump.should_log(&line) {
+        return;
+    }
+    // ffmpegの生出力は件数が多く、追跡の手掛かりとしては細かいためDEBUG扱いにする。
+    crate::log_debug!(Convert, "[ffmpeg] {line}");
     ctx.request_repaint_of(egui::ViewportId::ROOT);
 }
 
@@ -561,5 +578,69 @@ pub(crate) fn truncate_error(error: &str) -> String {
         format!("{text}...")
     } else {
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_ffmpeg_stats_lines() {
+        assert!(is_stats_line(
+            "frame=  120 fps= 59 q=-1.0 size=1024kB time=00:00:02.00 bitrate=4096.0kbits/s"
+        ));
+        assert!(is_stats_line(
+            "size=  512kB time=00:00:01.00 bitrate=1.0kbits/s"
+        ));
+        assert!(
+            !is_stats_line("[libx264 @ 0x7f8] using SAR=1/1"),
+            "通常のログ行をstats行と誤判定している"
+        );
+        assert!(
+            !is_stats_line("Output #0, mp4, to '/tmp/out.mp4':"),
+            "通常のログ行をstats行と誤判定している"
+        );
+    }
+
+    #[test]
+    fn stats_lines_are_throttled_but_other_lines_are_not() {
+        let mut pump = LogPump::default();
+        // `-stats_period 0.5` を模して連続で流し込む。間隔を空けないので1件だけ通るのが正しい。
+        let allowed = (0..5)
+            .filter(|index| {
+                pump.should_log(&format!("frame= {index} fps=59 time=00:00:0{index}.00"))
+            })
+            .count();
+        assert_eq!(allowed, 1, "stats行の間引きが効いていない: {allowed}件");
+        // stats行でない行は間引かない。
+        for _ in 0..3 {
+            assert!(
+                pump.should_log("Output #0, mp4, to '/tmp/out.mp4':"),
+                "通常のログ行を間引いている"
+            );
+        }
+    }
+
+    #[test]
+    fn error_text_keeps_every_line_including_throttled_stats() {
+        let ctx = egui::Context::default();
+        let mut pump = LogPump::default();
+        for index in 0..5 {
+            let line = format!("frame= {index} fps=59 time=00:00:0{index}.00");
+            emit_ffmpeg_log(line.as_bytes(), &ctx, &mut pump);
+        }
+        emit_ffmpeg_log(b"Conversion failed!", &ctx, &mut pump);
+
+        // 失敗時の原因調査に使うエラー本文は間引かず全行を保持する。
+        assert_eq!(
+            pump.error_text.lines().count(),
+            6,
+            "エラー本文から行が失われている"
+        );
+        assert!(
+            pump.error_text.ends_with("Conversion failed!"),
+            "最後の行が欠けている"
+        );
     }
 }

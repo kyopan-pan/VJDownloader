@@ -7,13 +7,13 @@
 - 対応プラットフォームは macOS と Windows のみ。それ以外のターゲットは `compile_error!` でビルドを止める。
 - yt-dlp / Deno / ffmpeg / ffprobe を外部ツールとして `~/.vjdownloader/bin` から実行する。未導入時は初回セットアップ画面で取得する。
 - 明確に動作を保証しているサイトはYouTube/Animethemes.moeの2サイト。
-- 仕様は `docs/spec.md`。検索エンジンの設計は `docs/search.md`。
+- 仕様は `docs/spec.md`。検索エンジンの設計は `docs/search.md`。ビルド・CI・リリース成果物は `docs/release.md`。
 
 ## Commands
 
 ```bash
 cargo check                      # 型チェック（既定フィーチャー: syphon 有効）
-cargo test                       # 全テスト（43件）
+cargo test                       # 全テスト（59件）
 cargo test search_index -- --test-threads=1   # 検索インデックスのみ直列実行
 cargo clippy --all-targets       # lint
 cargo fmt                        # 整形
@@ -74,7 +74,8 @@ cargo run                        # 起動（macOS）
 - `src/stream/`: ストリーム再生画面と Syphon 出力（`syphon` フィーチャー時のみ、macOS限定）。
 - `src/converter.rs`: MP4変換画面。H.264エンコーダは macOS が `h264_videotoolbox`、Windows が `libx264`。
 - `src/speed_test/`: 通信速度測定画面。
-- `src/logs/`: ログ収集と表示画面。
+- `src/logs/`: ログの集約点（`mod.rs`）、表示用リングバッファ（`ring.rs`）、ファイル出力とローテーション（`file.rs`）、ログ画面（`ui.rs`）。
+  呼び出し側はロガーの参照を持たず、`log_error!`/`log_warn!`/`log_info!` マクロで `mod.rs` の集約点へ送る。
 - `src/platform/`: OS依存実装の境界層。`common/` に境界をまたぐ共通型、`macos/` と `windows/` に各実装。配下は各OSでのみコンパイルされるため、ファイル内に `cfg` は不要。
 
 ## コードスタイル
@@ -87,6 +88,8 @@ cargo run                        # 起動（macOS）
 
 - 仕様を追加・変更したら `docs/spec.md` の該当箇所を追記・更新する。仕様を削除したら該当記述も削除する。
 - `docs/spec.md` はプラットフォーム差分がある項目に macOS / Windows を明記する。
+- `docs/spec.md` はアプリの振る舞いだけを書く。設計判断や実装ファイルの案内は `docs/search.md`、
+  ビルド構成・CI・配布物は `docs/release.md` に置き、同じ内容を二重に書かない。
 - ドキュメント内のファイル参照はリポジトリルートからの相対パスで書く。ローカルの絶対パスを書かない。
 
 ## コミット / PR

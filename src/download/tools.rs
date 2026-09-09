@@ -3,15 +3,14 @@ use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::converter::h264_encoder;
 use crate::fs_utils::{ensure_dir, is_executable};
 use crate::paths::{bin_dir, deno_path, executable_name, yt_dlp_path};
+use crate::platform::process::hidden_command;
 
-use super::{DownloadEvent, DownloadMode};
+use super::DownloadMode;
 
 // 途中で切れたダウンロードを壊れたバイナリとして扱うための下限サイズ。
 const MIN_TOOL_BYTES: u64 = 1024 * 1024;
@@ -31,7 +30,7 @@ const STALE_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const OBSOLETE_SUFFIX: &str = ".obsolete-";
 
 // yt-dlp が使える状態でなければ取得し、実行権限を保証して返す。
-pub fn ensure_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
+pub fn ensure_yt_dlp() -> Result<PathBuf, String> {
     let yt_dlp = yt_dlp_path();
     if is_usable_tool(&yt_dlp) {
         ensure_executable(&yt_dlp)?;
@@ -39,21 +38,21 @@ pub fn ensure_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf
     }
 
     if restore_interrupted_update(&yt_dlp) {
-        log_event(tx, "中断された更新からyt-dlpを復元しました。");
+        crate::log_info!(Setup, "中断された更新からyt-dlpを復元しました。");
         ensure_executable(&yt_dlp)?;
         return Ok(yt_dlp);
     }
 
     if yt_dlp.exists() {
-        log_event(tx, "yt-dlpが壊れています。再ダウンロードします。");
+        crate::log_info!(Setup, "yt-dlpが壊れています。再ダウンロードします。");
     } else {
-        log_event(tx, "yt-dlpが見つかりません。ダウンロードします。");
+        crate::log_info!(Setup, "yt-dlpが見つかりません。ダウンロードします。");
     }
-    install_yt_dlp(tx)
+    install_yt_dlp()
 }
 
 // deno が使える状態でなければ取得し、実行権限を保証して返す。
-pub fn ensure_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
+pub fn ensure_deno() -> Result<PathBuf, String> {
     let deno = deno_path();
     if is_usable_tool(&deno) {
         ensure_executable(&deno)?;
@@ -61,23 +60,23 @@ pub fn ensure_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, 
     }
 
     if restore_interrupted_update(&deno) {
-        log_event(tx, "中断された更新からdenoを復元しました。");
+        crate::log_info!(Setup, "中断された更新からdenoを復元しました。");
         ensure_executable(&deno)?;
         return Ok(deno);
     }
 
     if deno.exists() {
-        log_event(tx, "denoが壊れています。再ダウンロードします。");
+        crate::log_info!(Setup, "denoが壊れています。再ダウンロードします。");
     } else {
-        log_event(tx, "denoが見つかりません。ダウンロードします。");
+        crate::log_info!(Setup, "denoが見つかりません。ダウンロードします。");
     }
-    install_deno(tx)
+    install_deno()
 }
 
 // Windowsはffmpeg/ffprobeを同梱しないため、未導入の場合のみ公式ビルドを取得する。
 // 使用可能なものがbinフォルダかPATH上にあれば何もしない。
 #[cfg(target_os = "windows")]
-pub fn ensure_ffmpeg_tools(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<(), String> {
+pub fn ensure_ffmpeg_tools() -> Result<(), String> {
     // ロックが毒されていても取得自体は再試行できるため、中身をそのまま使う。
     let _guard = FFMPEG_INSTALL_LOCK
         .lock()
@@ -87,19 +86,22 @@ pub fn ensure_ffmpeg_tools(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<(
         return Ok(());
     }
 
-    log_event(tx, "ffmpeg/ffprobeが見つかりません。ダウンロードします。");
-    install_ffmpeg_tools(tx)?;
+    crate::log_info!(
+        Setup,
+        "ffmpeg/ffprobeが見つかりません。ダウンロードします。"
+    );
+    install_ffmpeg_tools()?;
 
     if !crate::paths::media_tools_ready() {
         return Err("ffmpeg/ffprobeを配置しましたが、実行確認に失敗しました。".to_string());
     }
-    log_event(tx, "ffmpeg/ffprobeをダウンロードしました。");
+    crate::log_info!(Setup, "ffmpeg/ffprobeをダウンロードしました。");
     Ok(())
 }
 
 // 公式ビルドのZIPを一時フォルダへ取得し、ffmpegとffprobeをまとめて配置する。
 #[cfg(target_os = "windows")]
-fn install_ffmpeg_tools(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<(), String> {
+fn install_ffmpeg_tools() -> Result<(), String> {
     let url = if cfg!(target_arch = "aarch64") {
         FFMPEG_WINDOWS_ARM64_URL
     } else {
@@ -112,25 +114,20 @@ fn install_ffmpeg_tools(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<(), 
     cleanup_stale_staging_dirs(&work_dir);
 
     let staging = create_tool_staging_dir(&work_dir, "ffmpeg")?;
-    let result = fetch_and_place_ffmpeg(url, &staging, &work_dir, tx);
+    let result = fetch_and_place_ffmpeg(url, &staging, &work_dir);
     let _ = fs::remove_dir_all(&staging);
     result
 }
 
 // ZIPの取得・展開・検証を終えてから、ffmpegとffprobeを本体へ入れ替える。
 #[cfg(target_os = "windows")]
-fn fetch_and_place_ffmpeg(
-    url: &str,
-    staging: &Path,
-    install_dir: &Path,
-    tx: Option<&mpsc::Sender<DownloadEvent>>,
-) -> Result<(), String> {
+fn fetch_and_place_ffmpeg(url: &str, staging: &Path, install_dir: &Path) -> Result<(), String> {
     let zip_path = staging.join("ffmpeg.zip");
     curl_download(url, &zip_path, "ffmpeg")?;
     extract_tool_zip(&zip_path, staging)?;
     let _ = fs::remove_file(&zip_path);
 
-    log_event(tx, "ffmpeg/ffprobeのダウンロード内容を確認します。");
+    crate::log_info!(Setup, "ffmpeg/ffprobeのダウンロード内容を確認します。");
 
     let mut staged = Vec::new();
     for label in ["ffmpeg", "ffprobe"] {
@@ -166,20 +163,20 @@ fn find_extracted_file(root: &Path, file_name: &str) -> Option<PathBuf> {
 }
 
 // 取得と検証が完了してから既存バイナリを置き換える。失敗時は旧バージョンを残す。
-pub fn update_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
-    log_event(tx, "yt-dlpの最新版をダウンロードします。");
-    install_yt_dlp(tx)
+pub fn update_yt_dlp() -> Result<PathBuf, String> {
+    crate::log_info!(Setup, "yt-dlpの最新版をダウンロードします。");
+    install_yt_dlp()
 }
 
 // 取得と検証が完了してから既存バイナリを置き換える。失敗時は旧バージョンを残す。
-pub fn update_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
-    log_event(tx, "denoの最新版をダウンロードします。");
-    install_deno(tx)
+pub fn update_deno() -> Result<PathBuf, String> {
+    crate::log_info!(Setup, "denoの最新版をダウンロードします。");
+    install_deno()
 }
 
 // yt-dlp を一時フォルダへ取得し、検証後に本体へ入れ替える。
-fn install_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
-    let installed = install_tool_staged(&yt_dlp_path(), "yt-dlp", tx, |staging| {
+fn install_yt_dlp() -> Result<PathBuf, String> {
+    let installed = install_tool_staged(&yt_dlp_path(), "yt-dlp", |staging| {
         #[cfg(not(target_os = "windows"))]
         let url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
         #[cfg(target_os = "windows")]
@@ -193,13 +190,13 @@ fn install_yt_dlp(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, S
         Ok(staged)
     })?;
 
-    log_event(tx, "yt-dlpをダウンロードしました。");
+    crate::log_info!(Setup, "yt-dlpをダウンロードしました。");
     Ok(installed)
 }
 
 // deno を一時フォルダへ取得・展開し、検証後に本体へ入れ替える。
-fn install_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, String> {
-    let installed = install_tool_staged(&deno_path(), "deno", tx, |staging| {
+fn install_deno() -> Result<PathBuf, String> {
+    let installed = install_tool_staged(&deno_path(), "deno", |staging| {
         #[cfg(not(target_os = "windows"))]
         let url = "https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip";
         #[cfg(target_os = "windows")]
@@ -221,17 +218,12 @@ fn install_deno(tx: Option<&mpsc::Sender<DownloadEvent>>) -> Result<PathBuf, Str
         Ok(staged)
     })?;
 
-    log_event(tx, "denoをダウンロードしました。");
+    crate::log_info!(Setup, "denoをダウンロードしました。");
     Ok(installed)
 }
 
 // 取得 → 検証 → 置き換え → 旧バージョン削除の順に処理し、途中失敗時は本体を触らない。
-fn install_tool_staged<F>(
-    target: &Path,
-    label: &str,
-    tx: Option<&mpsc::Sender<DownloadEvent>>,
-    fetch: F,
-) -> Result<PathBuf, String>
+fn install_tool_staged<F>(target: &Path, label: &str, fetch: F) -> Result<PathBuf, String>
 where
     F: FnOnce(&Path) -> Result<PathBuf, String>,
 {
@@ -245,7 +237,7 @@ where
 
     let staging = create_tool_staging_dir(&work_dir, label)?;
     let result = fetch(&staging).and_then(|staged| {
-        log_event(tx, &format!("{label}のダウンロード内容を確認します。"));
+        crate::log_info!(Setup, "{label}のダウンロード内容を確認します。");
         verify_staged_tool(&staged, label)?;
         replace_tool(&staged, target, label)
     });
@@ -313,7 +305,7 @@ fn verify_staged_tool(path: &Path, label: &str) -> Result<(), String> {
 
     ensure_executable(path)?;
 
-    let output = Command::new(path)
+    let output = hidden_command(path)
         .arg(tool_version_arg(label))
         .output()
         .map_err(|err| format!("{label}の起動確認に失敗しました: {err}"))?;
@@ -453,12 +445,6 @@ fn next_obsolete_path(path: &Path) -> PathBuf {
         }
     }
     parent.join(format!("{file_name}{OBSOLETE_SUFFIX}fallback"))
-}
-
-fn log_event(tx: Option<&mpsc::Sender<DownloadEvent>>, message: &str) {
-    if let Some(tx) = tx {
-        let _ = tx.send(DownloadEvent::Log(message.to_string()));
-    }
 }
 
 // 実行可能な deno を探索し、yt-dlp に渡す runtime 指定文字列を返す。
@@ -614,7 +600,7 @@ fn ensure_executable(path: &Path) -> Result<(), String> {
 }
 
 fn curl_download(url: &str, output_path: &Path, label: &str) -> Result<(), String> {
-    let status = Command::new("curl")
+    let status = hidden_command("curl")
         .arg("-L")
         // HTTPエラー応答を成果物として保存しないよう失敗扱いにする。
         .arg("--fail")
@@ -640,14 +626,14 @@ fn curl_download(url: &str, output_path: &Path, label: &str) -> Result<(), Strin
 
 fn extract_tool_zip(zip_path: &Path, destination: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let output = Command::new("powershell.exe")
+    let output = hidden_command("powershell.exe")
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
             "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:VJDL_ZIP_PATH, $env:VJDL_ZIP_DEST)"])
         .env("VJDL_ZIP_PATH", zip_path)
         .env("VJDL_ZIP_DEST", destination)
         .output();
     #[cfg(not(target_os = "windows"))]
-    let output = Command::new("unzip")
+    let output = hidden_command("unzip")
         .arg("-o")
         .arg(zip_path)
         .arg("-d")
@@ -671,7 +657,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        MIN_TOOL_BYTES, common_yt_dlp_args, install_tool_staged, is_usable_tool,
+        MIN_TOOL_BYTES, common_yt_dlp_args, hidden_command, install_tool_staged, is_usable_tool,
         previous_version_paths, replace_tool, restore_interrupted_update, tool_version_arg,
         verify_staged_tool,
     };
@@ -695,7 +681,7 @@ mod tests {
 
         replace_tool(&staged, &target, "yt-dlp").unwrap();
 
-        let output = std::process::Command::new(&target).output().unwrap();
+        let output = hidden_command(&target).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "new");
         assert!(previous_version_paths(&target).is_empty());
     }
@@ -723,7 +709,7 @@ mod tests {
         let target = dir.path().join("yt-dlp");
         write_dummy_tool(&target, "old");
 
-        let result = install_tool_staged(&target, "yt-dlp", None, |staging| {
+        let result = install_tool_staged(&target, "yt-dlp", |staging| {
             // 遅い回線でダウンロードが途中で切れた状況を再現する。
             let staged = staging.join("yt-dlp");
             fs::write(&staged, b"partial").unwrap();
@@ -732,7 +718,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(is_usable_tool(&target));
-        let output = std::process::Command::new(&target).output().unwrap();
+        let output = hidden_command(&target).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "old");
     }
 
@@ -788,7 +774,7 @@ mod windows_setup_tests {
         let source = dir.join("deno.exe");
         fs::write(&source, b"zip extraction fixture").unwrap();
         let zip = temp.path().join("test.zip");
-        let status = Command::new("powershell.exe")
+        let status = hidden_command("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command",
                 "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory($env:VJDL_TEST_SOURCE, $env:VJDL_TEST_ZIP)"])
             .env("VJDL_TEST_SOURCE", &dir).env("VJDL_TEST_ZIP", &zip)

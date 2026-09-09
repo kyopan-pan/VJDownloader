@@ -1,6 +1,5 @@
 use eframe::egui;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -12,6 +11,7 @@ use crate::download::{DownloadMode, ensure_deno, ensure_yt_dlp, update_deno, upd
 use crate::fs_utils::is_executable;
 use crate::paths::{default_download_dir, deno_path, make_absolute_path, yt_dlp_path};
 use crate::platform::file_dialog as mac_file_dialog;
+use crate::platform::process::hidden_command;
 use crate::settings::{
     ChromeProfile, SettingsData, cookie_args_from_settings, load_chrome_profiles, save_settings,
 };
@@ -21,6 +21,15 @@ use crate::theme::paint_viewport_background;
 enum ToolKind {
     YtDlp,
     Deno,
+}
+
+impl ToolKind {
+    fn label(self) -> &'static str {
+        match self {
+            ToolKind::YtDlp => "yt-dlp",
+            ToolKind::Deno => "Deno",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -269,14 +278,15 @@ impl SettingsUiState {
         let tx = self.tool_tx.clone();
         thread::spawn(move || {
             let result = match (kind, action) {
-                (ToolKind::YtDlp, ToolAction::Install) => ensure_yt_dlp(None),
-                (ToolKind::YtDlp, ToolAction::Update) => update_yt_dlp(None),
-                (ToolKind::Deno, ToolAction::Install) => ensure_deno(None),
-                (ToolKind::Deno, ToolAction::Update) => update_deno(None),
+                (ToolKind::YtDlp, ToolAction::Install) => ensure_yt_dlp(),
+                (ToolKind::YtDlp, ToolAction::Update) => update_yt_dlp(),
+                (ToolKind::Deno, ToolAction::Install) => ensure_deno(),
+                (ToolKind::Deno, ToolAction::Update) => update_deno(),
             };
 
             let mut state = ToolState::check(kind);
             if let Err(err) = result {
+                crate::log_error!(Setup, "{}のセットアップに失敗しました: {err}", kind.label());
                 state.status = format!("セットアップに失敗しました: {err}");
             }
             let _ = tx.send(ToolUpdate { kind, state });
@@ -1401,7 +1411,7 @@ fn tool_path(kind: ToolKind) -> PathBuf {
 }
 
 fn read_tool_version(kind: ToolKind, path: &PathBuf) -> Result<String, String> {
-    let mut cmd = Command::new(path);
+    let mut cmd = hidden_command(path);
     match kind {
         ToolKind::YtDlp => {
             cmd.arg("--version");

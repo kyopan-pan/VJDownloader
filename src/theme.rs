@@ -129,7 +129,8 @@ fn install_fonts(fonts: &mut egui::FontDefinitions) {
             return;
         }
     }
-    eprintln!(
+    crate::log_warn!(
+        App,
         "日本語フォントを読み込めませんでした: {}",
         fonts_dir.display()
     );

@@ -179,7 +179,11 @@ fn load_syphon_framework() -> Result<NonNull<c_void>, String> {
         };
         let handle = unsafe { dlopen(c_path.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
         if let Some(handle) = NonNull::new(handle) {
-            println!("[syphon] loaded framework: {}", path.to_string_lossy());
+            crate::log_debug!(
+                Stream,
+                "Syphon.frameworkを読み込みました: {}",
+                path.to_string_lossy()
+            );
             return Ok(handle);
         }
         errors.push(format!(

@@ -16,6 +16,7 @@ use url::Url;
 use crate::download::{ProcessTracker, js_runtime_arg};
 use crate::fs_utils::is_executable;
 use crate::paths::{bin_dir, ffmpeg_path, yt_dlp_path};
+use crate::platform::process::hidden_command;
 
 // デコード解像度（固定サイズの生RGBAフレーム）。
 // Syphon 出力時はマスターを高解像度で配信するため 1280x720、通常は軽量な 480x270。
@@ -157,7 +158,7 @@ fn cache_media(
     }
 
     let yt_dlp = yt_dlp_path();
-    let mut cmd = Command::new(&yt_dlp);
+    let mut cmd = hidden_command(&yt_dlp);
     cmd.arg("--no-playlist")
         .arg("--encoding")
         .arg("utf-8")
@@ -243,11 +244,12 @@ fn resolve_media(
         return Err("URL解決がキャンセルされました。".to_string());
     }
     if is_animethemes_url(url) {
-        println!("[stream] AnimeThemes resolve start: {url}");
+        crate::log_debug!(Stream, "AnimeThemesのURL解決を開始します: {url}");
         let direct_url = crate::download::animethemes::resolve_direct_webm(url)?
             .ok_or_else(|| "AnimeThemesの再生用直リンクを取得できませんでした。".to_string())?;
-        println!(
-            "[stream] AnimeThemes resolved: {}",
+        crate::log_debug!(
+            Stream,
+            "AnimeThemesのURLを解決しました: {}",
             summarize_media_url(&direct_url)
         );
         if cancel_flag.load(Ordering::Relaxed) {
@@ -261,8 +263,8 @@ fn resolve_media(
         return Err("yt-dlpが見つかりません。".to_string());
     }
 
-    println!("[stream] yt-dlp resolve start: {url}");
-    let mut cmd = Command::new(&yt_dlp);
+    crate::log_debug!(Stream, "yt-dlpでURL解決を開始します: {url}");
+    let mut cmd = hidden_command(&yt_dlp);
     cmd.arg("--no-playlist").arg("--encoding").arg("utf-8");
     cmd.args(cookie_args);
     cmd.args([
@@ -293,12 +295,16 @@ fn resolve_media(
     if cancel_flag.load(Ordering::Relaxed) {
         return Err("URL解決がキャンセルされました。".to_string());
     }
-    println!("[stream] yt-dlp exited: {}", output.status);
+    crate::log_debug!(Stream, "yt-dlpが終了しました: {}", output.status);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !stderr.is_empty() {
-            println!("[stream] yt-dlp stderr:\n{}", sanitize_log_text(&stderr));
+            crate::log_warn!(
+                Stream,
+                "yt-dlpの標準エラー出力: {}",
+                sanitize_log_text(&stderr)
+            );
         }
         let detail = if stderr.is_empty() {
             output.status.to_string()
@@ -323,13 +329,13 @@ fn resolve_media(
     if urls.is_empty() {
         return Err("再生用URLを取得できませんでした。".to_string());
     }
-    println!(
-        "[stream] yt-dlp resolved: duration={:?}, urls={}",
-        duration,
+    crate::log_debug!(
+        Stream,
+        "yt-dlpのURL解決が完了しました: 再生時間={duration:?}, ストリーム数={}",
         urls.len()
     );
     for (index, url) in urls.iter().enumerate() {
-        println!("[stream] media url {index}: {}", summarize_media_url(url));
+        crate::log_debug!(Stream, "ストリーム{index}: {}", summarize_media_url(url));
     }
     Ok((duration, urls))
 }
@@ -368,8 +374,9 @@ fn run_ffmpeg(
         return Ok(());
     }
 
-    println!(
-        "[stream] ffmpeg start: inputs={}, offset={start_offset:.3}, size={}x{}, fps={}",
+    crate::log_debug!(
+        Stream,
+        "ffmpegを開始します: 入力数={}, 開始位置={start_offset:.3}, サイズ={}x{}, fps={}",
         urls.len(),
         PREVIEW_WIDTH,
         PREVIEW_HEIGHT,
@@ -387,7 +394,10 @@ fn run_ffmpeg(
         true,
     ) {
         Err(FfmpegRunError::MissingAudioOutput) if !cancel_flag.load(Ordering::Relaxed) => {
-            println!("[stream] audio stream not found; retrying video-only playback");
+            crate::log_warn!(
+                Stream,
+                "音声ストリームが見つかりません。映像のみで再試行します。"
+            );
             run_ffmpeg_attempt(
                 &ffmpeg,
                 urls,
@@ -467,8 +477,9 @@ fn run_ffmpeg_attempt(
         tracker.terminate_all();
         let _ = child.wait();
         tracker.unregister(pid);
-        println!(
-            "[stream] ffmpeg stopped by receiver/cancel: frames={frame_count}, receiver_closed={receiver_closed}"
+        crate::log_debug!(
+            Stream,
+            "ffmpegを停止しました（受信終了またはキャンセル）: フレーム数={frame_count}, 受信側終了={receiver_closed}"
         );
         return Ok(());
     }
@@ -481,9 +492,12 @@ fn run_ffmpeg_attempt(
         let _ = handle.join();
     }
     let stderr_tail = collect_stderr_tail(stderr_rx);
-    println!("[stream] ffmpeg exited: {status}, frames={frame_count}");
+    crate::log_debug!(
+        Stream,
+        "ffmpegが終了しました: {status}, フレーム数={frame_count}"
+    );
     if !stderr_tail.is_empty() {
-        println!("[stream] ffmpeg stderr tail:\n{stderr_tail}");
+        crate::log_warn!(Stream, "ffmpegの標準エラー出力（末尾）: {stderr_tail}");
     }
     if !status.success() {
         if include_audio && stderr_tail.contains("does not contain any stream") {
@@ -526,7 +540,7 @@ fn build_ffmpeg_command(
     );
     let offset = format!("{start_offset:.3}");
 
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = hidden_command(ffmpeg);
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
@@ -670,7 +684,7 @@ fn flush_progress_segment(
         });
     } else {
         let sanitized = sanitize_log_text(&text);
-        println!("[stream] ffmpeg stderr: {sanitized}");
+        crate::log_warn!(Stream, "ffmpegの標準エラー出力: {sanitized}");
         let _ = stderr_tx.send(sanitized);
     }
 }

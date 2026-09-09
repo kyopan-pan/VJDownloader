@@ -8,3 +8,4 @@
 # バイナリアセットは属性変換とdiffの対象外にする
 assets/bin/** binary
 *.icns binary
+*.ico binary

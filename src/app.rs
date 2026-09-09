@@ -6,8 +6,8 @@ use crate::download::{
     ensure_deno, ensure_yt_dlp, is_youtube_url, read_clipboard_text, run_download,
 };
 use crate::fs_utils::{delete_download_file, is_executable, load_mp4_files};
-use crate::logs::AppLogger;
 use crate::logs::ui::LogUiState;
+use crate::logs::{self, AppLogger};
 use crate::paths::{search_index_db_path, yt_dlp_path};
 use crate::platform::input_source::{InputMode, current_mode};
 use crate::platform::menu as mac_menu;
@@ -23,8 +23,10 @@ use crate::stream::ui as stream_ui;
 use crate::stream::ui::StreamUiState;
 use crate::theme::apply_theme;
 use crate::ui;
+use crate::{log_error, log_info, log_warn};
 use drag::{DragItem, Image, Options};
 use eframe::egui;
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -32,6 +34,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub fn run() -> eframe::Result<()> {
+    // ログの集約点はウィンドウを開く前に用意する。起動途中の失敗も記録できるようにする。
+    logs::init();
+    install_panic_hook();
+    // 何も起きない起動ではログファイルが1件も作られないため、起動自体を1行残す。
+    // セッションの開始位置とバージョンの手掛かりにもなる。
+    log_info!(
+        App,
+        "VJDownloader {} を起動しました",
+        env!("CARGO_PKG_VERSION")
+    );
     let settings = SettingsData::load();
     let window_width = settings.window_width.parse::<f32>().unwrap_or(860.0);
     let window_height = settings.window_height.parse::<f32>().unwrap_or(1000.0);
@@ -41,16 +53,45 @@ pub fn run() -> eframe::Result<()> {
         .with_always_on_top();
     #[cfg(target_os = "macos")]
     let viewport = viewport.with_icon(egui::IconData::default());
+    // Windows はアプリバンドルが無く、指定しないと eframe 既定の egui ロゴが
+    // タスクバーとタイトルバーに出るため、実行時にも自前のアイコンを渡す。
+    #[cfg(target_os = "windows")]
+    let viewport = viewport.with_icon(window_icon());
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "VJDownloader",
         options,
         Box::new(|cc| Ok(Box::new(DownloaderApp::new(cc)))),
-    )
+    );
+    // 静的な送信口はプロセス終了まで残るため、明示的にキューを排出して writer を待つ。
+    logs::shutdown();
+    result
+}
+
+/// ワーカースレッドの panic は既定では標準エラーへ出るだけで、コンソールを持たない
+/// リリースビルドでは失われる。ログファイルへ残し、後から原因を追えるようにする。
+fn install_panic_hook() {
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let thread = thread::current();
+        let name = thread.name().unwrap_or("(名前なし)").to_string();
+        // ログ画面のリングは触らない。描画中（ロック保持中）の panic で自己デッドロックしないため。
+        logs::emit_panic(format!("panicが発生しました [thread: {name}] {info}"));
+        previous(info);
+    }));
+}
+
+/// タスクバー・タイトルバー用のアイコン。
+/// eframe が必要なサイズへ縮小するため、素材は最大解像度の256pxを渡す。
+#[cfg(target_os = "windows")]
+fn window_icon() -> egui::IconData {
+    const ICON_PNG: &[u8] = include_bytes!("../assets/icon/App.iconset/icon_256x256.png");
+    // 埋め込み画像なので実行時に壊れることはなく、失敗時は既定アイコンで起動を続ける。
+    eframe::icon_data::from_png_bytes(ICON_PNG).unwrap_or_default()
 }
 
 #[derive(Clone)]
@@ -150,7 +191,12 @@ impl DownloaderApp {
             if let Err(err) = engine.sync_roots(&root_paths) {
                 search_roots_sync_error = Some(err);
             }
-            let _ = engine.reindex_all_async();
+            if let Err(err) = engine.reindex_all_async() {
+                log_error!(
+                    Search,
+                    "検索インデックスの初期更新を開始できませんでした: {err}"
+                );
+            }
         }
 
         let (search_job_tx, search_result_rx) = if let Some(engine) = search_engine.clone() {
@@ -183,7 +229,7 @@ impl DownloaderApp {
             log_ui: Arc::new(Mutex::new(LogUiState::new())),
             speed_test_ui: Arc::new(Mutex::new(SpeedTestUiState::new())),
             stream_ui: Arc::new(Mutex::new(StreamUiState::new())),
-            status_logs: Arc::new(Mutex::new(AppLogger::new())),
+            status_logs: logs::init(),
             pending_window_resize: None,
             did_snap: false,
             current_window_size: None,
@@ -211,20 +257,21 @@ impl DownloaderApp {
         mac_window::apply_app_icon_from_icns();
 
         if let Some(err) = bundled_tools_error {
-            app.push_status(format!("同梱ツールの配置に失敗しました: {err}"));
+            log_error!(Setup, "同梱ツールの配置に失敗しました: {err}");
         }
 
-        // Windowsではffmpeg/ffprobeも取得対象になるため、状態ログへ結果を残せるようにする。
-        #[cfg(target_os = "windows")]
-        let status_logs = app.status_logs.clone();
+        // ロガーはグローバルな集約点を参照するため、スレッドへ参照を渡す必要がない。
         thread::spawn(move || {
-            let _ = ensure_yt_dlp(None);
-            let _ = ensure_deno(None);
+            if let Err(err) = ensure_yt_dlp() {
+                log_error!(Setup, "yt-dlpのセットアップに失敗しました: {err}");
+            }
+            if let Err(err) = ensure_deno() {
+                log_error!(Setup, "Denoのセットアップに失敗しました: {err}");
+            }
+            // Windowsではffmpeg/ffprobeも取得対象になる。
             #[cfg(target_os = "windows")]
-            if let Err(err) = crate::download::ensure_ffmpeg_tools(None) {
-                if let Ok(mut logs) = status_logs.lock() {
-                    logs.push(format!("ffmpeg/ffprobeのセットアップに失敗しました: {err}"));
-                }
+            if let Err(err) = crate::download::ensure_ffmpeg_tools() {
+                log_error!(Setup, "ffmpeg/ffprobeのセットアップに失敗しました: {err}");
             }
         });
 
@@ -238,21 +285,15 @@ impl DownloaderApp {
         app
     }
 
-    pub(crate) fn push_status(&mut self, message: impl Into<String>) {
-        if let Ok(mut logs) = self.status_logs.lock() {
-            logs.push(message);
-        }
-    }
-
     pub(crate) fn start_download_from_clipboard(&mut self) {
         let Some(url) = read_clipboard_text() else {
             return;
         };
 
         if !self.is_tools_ready() {
-            self.push_status(
+            log_warn!(
+                Setup,
                 "初回セットアップが必要です。設定から自動セットアップを行ってください。"
-                    .to_string(),
             );
             self.settings_ui.open_initial_setup();
             return;
@@ -273,7 +314,7 @@ impl DownloaderApp {
         self.cancel_flag = Some(cancel_flag.clone());
         self.process_tracker = Some(tracker.clone());
 
-        self.push_status(format!("Downloading to {}", output_dir.to_string_lossy()));
+        log_info!(Download, "Downloading to {}", output_dir.to_string_lossy());
 
         let active_flag = self.download_active_flag.clone();
         thread::spawn(move || {
@@ -307,7 +348,7 @@ impl DownloaderApp {
             Ok(()) => {
                 self.refresh_needed = true;
             }
-            Err(err) => self.push_status(format!("削除に失敗しました: {err}")),
+            Err(err) => log_error!(App, "削除に失敗しました: {err}"),
         }
     }
 
@@ -315,7 +356,7 @@ impl DownloaderApp {
         let path = match path.canonicalize() {
             Ok(path) => path,
             Err(err) => {
-                self.push_status(format!("ドラッグ対象の取得に失敗しました: {err}"));
+                log_error!(App, "ドラッグ対象の取得に失敗しました: {err}");
                 return;
             }
         };
@@ -327,7 +368,7 @@ impl DownloaderApp {
             |_result, _position| {},
             Options::default(),
         ) {
-            self.push_status(format!("ドラッグ開始に失敗しました: {err}"));
+            log_error!(App, "ドラッグ開始に失敗しました: {err}");
         }
     }
 
@@ -365,7 +406,8 @@ impl DownloaderApp {
             }
         }
 
-        // キャンセルで強制終了したプロセスが吐く終了エラー出力はログに残さない。
+        // キャンセルで強制終了したプロセスが出すBot対策相当の通知は無視する。
+        // 外部ツールの出力ログ自体は送出側（ProgressContext::is_cancelling）で抑制している。
         let cancelling = self
             .cancel_flag
             .as_ref()
@@ -374,11 +416,6 @@ impl DownloaderApp {
         let mut done = None;
         for event in events {
             match event {
-                DownloadEvent::Log(line) => {
-                    if !cancelling {
-                        self.push_status(line);
-                    }
-                }
                 DownloadEvent::Progress(update) => self.handle_progress_update(update),
                 DownloadEvent::Guard(notice) => {
                     if !cancelling {
@@ -394,11 +431,11 @@ impl DownloaderApp {
             let failed = matches!(&result, Err(err) if err != CANCELLED_ERROR);
             self.bot_guard.finish_run(failed);
             match result {
-                Ok(()) => self.push_status(format!("Download completed. Total time: {elapsed}")),
+                Ok(()) => log_info!(Download, "Download completed. Total time: {elapsed}"),
                 Err(err) if err == CANCELLED_ERROR => {
-                    self.push_status("ダウンロードをキャンセルしました。".to_string())
+                    log_info!(Download, "ダウンロードをキャンセルしました。")
                 }
-                Err(err) => self.push_status(format!("Download failed: {err}")),
+                Err(err) => log_error!(Download, "Download failed: {err}"),
             }
             let restriction_status = self.bot_guard.restriction().map(|restriction| {
                 format!(
@@ -408,7 +445,7 @@ impl DownloaderApp {
                 )
             });
             if let Some(message) = restriction_status {
-                self.push_status(message);
+                log_warn!(Download, "{message}");
             }
             self.download_in_progress = false;
             self.download_active_flag.store(false, Ordering::Relaxed);
@@ -423,16 +460,16 @@ impl DownloaderApp {
         while let Ok(event) = self.converter_ui.try_recv_event() {
             match event {
                 ConversionEvent::Completed(_path) => {
-                    self.push_status(format!(
+                    log_info!(
+                        Convert,
                         "MP4変換が完了しました: {}",
                         _path.to_string_lossy()
-                    ));
+                    );
                     self.refresh_needed = true;
                 }
                 ConversionEvent::Failed(error) => {
-                    self.push_status(format!("MP4変換に失敗しました: {error}"));
+                    log_error!(Convert, "MP4変換に失敗しました: {error}");
                 }
-                ConversionEvent::Log(line) => self.push_status(line),
             }
         }
     }
@@ -482,10 +519,10 @@ impl DownloaderApp {
 
         self.last_input_mode = Some(mode.clone());
         match mode {
-            InputMode::Japanese => self.push_status("日本語になりました".to_string()),
-            InputMode::English => self.push_status("英字になりました".to_string()),
+            InputMode::Japanese => log_info!(App, "日本語になりました"),
+            InputMode::English => log_info!(App, "英字になりました"),
             InputMode::Other(name) => {
-                self.push_status(format!("入力ソースが変更されました: {name}"))
+                log_info!(App, "入力ソースが変更されました: {name}")
             }
         }
     }
@@ -702,7 +739,9 @@ impl eframe::App for DownloaderApp {
         }
         data.download_panel_width = format_dimension(self.download_panel_width.max(1.0));
         data.search_panel_width = format_dimension(self.search_panel_width.max(1.0));
-        let _ = save_settings(&data);
+        if let Err(err) = save_settings(&data) {
+            log_error!(App, "終了時の設定保存に失敗しました: {err}");
+        }
     }
 }
 

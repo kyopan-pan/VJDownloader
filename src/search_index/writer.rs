@@ -14,7 +14,7 @@ pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
     }) {
         Ok(conn) => conn,
         Err(err) => {
-            eprintln!("[search-index] writer failed to initialize DB: {err}");
+            crate::log_error!(Search, "検索インデックスのDB初期化に失敗しました: {err}");
             return;
         }
     };
@@ -25,7 +25,7 @@ pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
         }
 
         if let Err(err) = apply_write_command(&mut conn, cmd) {
-            eprintln!("[search-index] writer command failed: {err}");
+            crate::log_error!(Search, "検索インデックスの更新に失敗しました: {err}");
         }
     }
 }

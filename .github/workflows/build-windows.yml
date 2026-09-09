@@ -40,25 +40,24 @@ jobs:
         shell: pwsh
         run: cargo build --release --locked --no-default-features --target x86_64-pc-windows-msvc
 
-      # exe 単体では配布時にライセンス表示が付かないため ZIP へまとめる。
+      # exe 単体では配布時にライセンス表示が付かないため同梱物を1つのフォルダへ集める。
       # Windows は ffmpeg を同梱せず実行時に取得するため LGPL 文書は含めない
-      - name: Create ZIP artifact (配布用ZIP作成)
+      - name: Stage distribution files (配布物の収集)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $stage = "dist/VJDownloader-$env:APP_VERSION-windows-x64"
-          $zipPath = "dist/VJDownloader-$env:APP_VERSION-windows-x64.zip"
           Remove-Item -Recurse -Force "dist" -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/VJDownloader.exe" "$stage/VJDownloader.exe"
           Copy-Item "LICENSE" "$stage/LICENSE.txt"
           Copy-Item "THIRD_PARTY_NOTICES.md" "$stage/THIRD_PARTY_NOTICES.md"
-          Compress-Archive -Path "$stage/*" -DestinationPath $zipPath -Force
-          "ZIP_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "STAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # ZIP を成果物としてアップロード
+      # upload-artifact が自動でZIP化するため、ここで自前にZIPを作ると
+      # ダウンロード時にZIPの中にZIPが入る二重圧縮になる。フォルダのまま渡す
       - name: Upload build artifact (成果物アップロード)
         uses: actions/upload-artifact@v7.0.1
         with:
           name: VJDownloader-${{ env.APP_VERSION }}-windows-x64
-          path: ${{ env.ZIP_PATH }}
+          path: ${{ env.STAGE_DIR }}

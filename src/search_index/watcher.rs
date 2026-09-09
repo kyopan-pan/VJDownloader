@@ -30,7 +30,7 @@ pub(super) fn watcher_loop(
     ) {
         Ok(watcher) => watcher,
         Err(err) => {
-            eprintln!("[search-index] failed to create watcher: {err}");
+            crate::log_error!(Search, "フォルダ監視を開始できませんでした: {err}");
             return;
         }
     };
@@ -53,7 +53,10 @@ pub(super) fn watcher_loop(
                 collect_pending_change(&mut pending, &event);
             }
             Ok(Err(err)) => {
-                eprintln!("[search-index] watcher event error: {err}");
+                crate::log_warn!(
+                    Search,
+                    "フォルダ監視のイベント取得に失敗しました。全体を再走査します: {err}"
+                );
                 trigger_reindex_all_from_db(&db_path, &write_tx);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -63,7 +66,10 @@ pub(super) fn watcher_loop(
         if should_flush_pending(&pending)
             && let Err(err) = flush_pending_changes(&mut pending, &watched_roots, &write_tx)
         {
-            eprintln!("[search-index] failed to flush watcher changes: {err}");
+            crate::log_warn!(
+                Search,
+                "監視結果の反映に失敗しました。全体を再走査します: {err}"
+            );
             trigger_reindex_all_from_db(&db_path, &write_tx);
         }
     }
@@ -77,10 +83,10 @@ fn reset_watch_targets(
 ) {
     for root in current.iter() {
         if let Err(err) = watcher.unwatch(&root.root_path) {
-            eprintln!(
-                "[search-index] failed to unwatch {}: {}",
-                root.root_path.to_string_lossy(),
-                err
+            crate::log_warn!(
+                Search,
+                "フォルダ監視の解除に失敗しました: {} ({err})",
+                root.root_path.to_string_lossy()
             );
         }
     }
@@ -91,10 +97,10 @@ fn reset_watch_targets(
             continue;
         }
         if let Err(err) = watcher.watch(&root.root_path, RecursiveMode::Recursive) {
-            eprintln!(
-                "[search-index] failed to watch {}: {}",
-                root.root_path.to_string_lossy(),
-                err
+            crate::log_error!(
+                Search,
+                "フォルダ監視を追加できませんでした: {} ({err})",
+                root.root_path.to_string_lossy()
             );
             continue;
         }
