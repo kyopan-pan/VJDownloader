@@ -44,6 +44,17 @@ cargo test search_index -- --test-threads=1
 - SQLiteは同時書き込みを許さない。フルスキャン・差分更新・ルート同期がいずれも書き込むため、
   キューで直列化して呼び出し側からロック競合とリトライを消している
 
+### 大量ファイル向けの実装上の注意
+- `open_connection`で`case_sensitive_like=ON`を設定している。`LIKE`は既定で大小文字を区別せず、
+  そのままではBINARY照合の`idx_files_file_name_norm`を使えず全表走査になる。検索対象の
+  `file_name_norm` / `comment_norm`はクエリ側とともに`normalize_for_search`で小文字化済みなので、
+  区別する設定にしても一致結果は変わらない
+- 走査中のメタデータは`WalkDir`の`DirEntry`から取り出す。Windowsではディレクトリ列挙時に
+  取得済みのものがキャッシュされており、`fs::metadata`を呼び直すとファイル数ぶんの追加I/Oになる
+- ディレクトリ配下の削除は`path LIKE 'prefix%'`ではなく主キーの範囲比較で引く。`OR`と`ESCAPE`が
+  付いた`LIKE`は索引が効かず、プレフィックス1件ごとに`files`を全走査してしまう
+- `ffprobe`は`FFPROBE_TIMEOUT`付きで実行する。応答しない1ファイルでスキャン全体が止まらないようにする
+
 ### 2段階検索の構成
 - 単語1つのクエリは、第1段階でファイル名の前方一致のみを引き、完全一致を先頭に並べる
 - 上限件数に届かない場合だけ、第2段階でファイル名とコメントの部分一致を引いて補う。
@@ -79,6 +90,7 @@ cargo test search_index -- --test-threads=1
 | `normalize_for_search` | NFKC + lower + カタカナのひらがな化 | 検索正規化方式 |
 | `DEBOUNCE_WINDOW` | 700ms | 監視イベントのデバウンス幅 |
 | `UPSERT_BATCH_SIZE` | 256 | バッチupsert件数 |
+| `FFPROBE_TIMEOUT` | 30s | 1ファイルあたりの`ffprobe`応答待ち上限 |
 | `MAX_SEARCH_LIMIT` | 1000 | 1回の検索で返す最大件数 |
 
 ## 実装主要ファイル

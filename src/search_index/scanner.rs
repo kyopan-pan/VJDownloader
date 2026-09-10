@@ -1,10 +1,13 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::process::{Child, Stdio};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
+use std::time::Duration;
 use walkdir::WalkDir;
 
 use crate::paths::ffprobe_path;
@@ -15,7 +18,9 @@ use super::normalize::{
     epoch_millis, epoch_secs, is_supported_video_path, normalize_for_search, path_to_key,
     system_time_to_epoch_secs,
 };
-use super::{EngineResult, FileRecord, UPSERT_BATCH_SIZE, WatchedRoot, WriteCommand};
+use super::{
+    EngineResult, FFPROBE_TIMEOUT, FileRecord, UPSERT_BATCH_SIZE, WatchedRoot, WriteCommand,
+};
 
 type ScanKey = (PathBuf, i64);
 type ScanLockMap = HashMap<ScanKey, Arc<Mutex<()>>>;
@@ -126,10 +131,19 @@ pub(super) fn scan_root(
             continue;
         }
 
+        // Windows では列挙時に取得済みのメタデータが DirEntry にキャッシュされている。
+        // fs::metadata を呼び直すとファイル数と同じ回数だけ余計にファイルを開くことになる。
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
         let path_key = path_to_key(path);
-        if let Some(record) =
-            build_record_from_path(root_id, path, marker, cached_files.get(&path_key))
-        {
+        if let Some(record) = build_record(
+            root_id,
+            path,
+            &metadata,
+            marker,
+            cached_files.get(&path_key),
+        ) {
             batch.push(record);
         }
 
@@ -172,7 +186,10 @@ pub(super) fn upsert_directory(
             continue;
         };
 
-        if let Some(record) = build_record_from_path(root_id, path, marker, None) {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if let Some(record) = build_record(root_id, path, &metadata, marker, None) {
             batch.push(record);
         }
 
@@ -210,13 +227,15 @@ fn flush_upsert_batch(
 }
 
 // ファイルメタデータから DB upsert 用レコードを組み立てる。
-pub(super) fn build_record_from_path(
+// メタデータは呼び出し側が取得済みのものを渡す。走査中に取り直すとファイル数ぶんの
+// 追加 I/O になるため。
+pub(super) fn build_record(
     root_id: i64,
     path: &Path,
+    metadata: &fs::Metadata,
     marker: i64,
     cached: Option<&CachedFile>,
 ) -> Option<FileRecord> {
-    let metadata = fs::metadata(path).ok()?;
     if !metadata.is_file() {
         return None;
     }
@@ -310,8 +329,8 @@ fn load_cached_files(db_path: &Path, root_id: i64) -> EngineResult<HashMap<Strin
 }
 
 // ffprobeからコメント系タグを取得する。タグ名の大文字・小文字は区別しない。
-fn read_search_comment(path: &Path) -> EngineResult<String> {
-    let output = hidden_command(ffprobe_path())
+pub(super) fn read_search_comment(path: &Path) -> EngineResult<String> {
+    let mut child = hidden_command(ffprobe_path())
         .arg("-v")
         .arg("error")
         .arg("-show_entries")
@@ -319,16 +338,59 @@ fn read_search_comment(path: &Path) -> EngineResult<String> {
         .arg("-of")
         .arg("json")
         .arg(path)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| err.to_string())?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let output = match read_child_output(&mut child, FFPROBE_TIMEOUT) {
+        Some(output) => output,
+        None => {
+            // 応答しない ffprobe を放置するとスキャンがそのファイルで止まったままになる。
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "ffprobeが{}秒以内に応答しませんでした",
+                FFPROBE_TIMEOUT.as_secs()
+            ));
+        }
+    };
+
+    let status = child.wait().map_err(|err| err.to_string())?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&output.1);
         return Err(stderr.trim().to_string());
     }
 
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())?;
+    let value: Value = serde_json::from_slice(&output.0).map_err(|err| err.to_string())?;
     Ok(parse_search_comment(&value))
+}
+
+// 子プロセスの stdout / stderr を読み切って返す。制限時間内に閉じなければ None。
+//
+// パイプだけを別スレッドへ移し、Child は呼び出し側に残す。こうすると待ち受け側は
+// タイムアウト時にそのまま kill でき、stdout と stderr を並行して読むので
+// どちらかのパイプバッファが埋まってデッドロックすることもない。
+fn read_child_output(child: &mut Child, timeout: Duration) -> Option<(Vec<u8>, Vec<u8>)> {
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            let _ = tx.send(buf);
+        });
+        rx
+    }
+
+    let stdout_rx = drain(child.stdout.take());
+    let stderr_rx = drain(child.stderr.take());
+
+    let stdout = stdout_rx.recv_timeout(timeout).ok()?;
+    let stderr = stderr_rx.recv_timeout(timeout).ok()?;
+    Some((stdout, stderr))
 }
 
 fn parse_search_comment(value: &Value) -> String {

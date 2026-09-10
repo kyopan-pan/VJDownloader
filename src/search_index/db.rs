@@ -15,6 +15,11 @@ pub(super) fn open_connection(path: &Path) -> EngineResult<Connection> {
         .map_err(|err| err.to_string())?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|err| err.to_string())?;
+    // LIKE は既定で大小文字を区別せず、そのままでは BINARY 照合の索引を使えないため全表走査になる。
+    // 検索対象の file_name_norm / comment_norm はクエリ側とともに normalize_for_search で
+    // 小文字化済みなので、区別する設定にしても一致結果は変わらず、前方一致で索引が効くようになる。
+    conn.pragma_update(None, "case_sensitive_like", true)
+        .map_err(|err| err.to_string())?;
     Ok(conn)
 }
 

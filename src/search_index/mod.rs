@@ -23,6 +23,9 @@ use writer::writer_loop;
 const DB_SCHEMA_VERSION: i32 = 2;
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(700);
 const UPSERT_BATCH_SIZE: usize = 256;
+// 応答しない ffprobe でスキャンが止まらないようにする上限。moov アトムの読み取りは
+// 低速なHDDでも数秒で終わるため、これを超えるものは異常とみなして打ち切る。
+const FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SEARCH_LIMIT: usize = 1_000;
 
 pub type EngineResult<T> = Result<T, String>;
@@ -36,6 +39,15 @@ pub enum IndexEvent {
         target: IndexEventTarget,
         result: EngineResult<()>,
     },
+}
+
+// フルスキャンをどのルートに対して起こすか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanTrigger {
+    // 今回新しく追加されたルートだけを走査する。
+    NewRootsOnly,
+    // 有効なルートすべてを走査する。
+    AllRoots,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,19 +258,25 @@ impl SearchEngine {
         Ok(entries)
     }
 
-    // desired ルート集合と DB の差分を同期し、必要な full scan を起動する。
-    pub fn sync_roots(&self, desired_paths: &[PathBuf]) -> EngineResult<()> {
-        self.sync_roots_with_target(desired_paths, IndexEventTarget::Main)
+    // 起動時用。ルート同期と全ルートのスキャンを1回の呼び出しでまとめる。
+    // sync_roots と reindex_all_async を続けて呼ぶと、新規追加ルートを二重に走査してしまう。
+    pub fn sync_roots_and_rescan(&self, desired_paths: &[PathBuf]) -> EngineResult<()> {
+        self.sync_roots_with_target(desired_paths, IndexEventTarget::Main, ScanTrigger::AllRoots)
     }
 
     pub fn sync_roots_from_settings(&self, desired_paths: &[PathBuf]) -> EngineResult<()> {
-        self.sync_roots_with_target(desired_paths, IndexEventTarget::Settings)
+        self.sync_roots_with_target(
+            desired_paths,
+            IndexEventTarget::Settings,
+            ScanTrigger::NewRootsOnly,
+        )
     }
 
     fn sync_roots_with_target(
         &self,
         desired_paths: &[PathBuf],
         target: IndexEventTarget,
+        trigger: ScanTrigger,
     ) -> EngineResult<()> {
         let mut normalized_paths = Vec::new();
         let mut dedup = HashSet::new();
@@ -293,7 +311,7 @@ impl SearchEngine {
         for (path, key) in &normalized_paths {
             let added_now = !current_map.contains_key(key);
             let root_id = self.add_or_enable_root(key)?;
-            if added_now {
+            if added_now || matches!(trigger, ScanTrigger::AllRoots) {
                 self.start_full_scan(root_id, path.clone(), target);
                 scan_started = true;
             }
@@ -320,6 +338,7 @@ impl SearchEngine {
     }
 
     // 有効ルートすべてに対して再インデックスを非同期起動する。
+    #[cfg(test)]
     pub fn reindex_all_async(&self) -> EngineResult<()> {
         self.reindex_all_async_for(IndexEventTarget::Main)
             .map(|_| ())
@@ -533,7 +552,7 @@ mod tests {
         write_dummy(&root.join("ignore.txt"), 64);
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -566,7 +585,7 @@ mod tests {
         write_dummy(&root.join("完了通知.mp4"), 64);
         let events = engine.subscribe_index_events();
 
-        engine.sync_roots(&[root]).expect("sync roots");
+        engine.sync_roots_and_rescan(&[root]).expect("sync roots");
         assert!(matches!(
             events.recv_timeout(Duration::from_secs(2)),
             Ok(IndexEvent::UpdateStarted {
@@ -601,7 +620,7 @@ mod tests {
         write_dummy(&root.join("large.mp4"), 8_192);
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -626,7 +645,7 @@ mod tests {
         fs::create_dir_all(&root).expect("create root");
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         thread::sleep(Duration::from_millis(200));
 
@@ -686,7 +705,7 @@ mod tests {
 
         write_dummy(&root.join("100%_test.mp4"), 64);
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -711,7 +730,7 @@ mod tests {
         write_dummy(&root.join("ふ・れ・ん・ど・し・た・い.mp4"), 64);
         write_dummy(&root.join("ふ・た・り.mp4"), 64);
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -748,7 +767,7 @@ mod tests {
         write_dummy(&video_path, 64);
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -793,7 +812,7 @@ mod tests {
         write_dummy(&root.join("ウザい映像.mp4"), 64);
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));

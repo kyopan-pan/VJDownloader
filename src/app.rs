@@ -188,14 +188,8 @@ impl DownloaderApp {
                 .iter()
                 .map(PathBuf::from)
                 .collect::<Vec<_>>();
-            if let Err(err) = engine.sync_roots(&root_paths) {
+            if let Err(err) = engine.sync_roots_and_rescan(&root_paths) {
                 search_roots_sync_error = Some(err);
-            }
-            if let Err(err) = engine.reindex_all_async() {
-                log_error!(
-                    Search,
-                    "検索インデックスの初期更新を開始できませんでした: {err}"
-                );
             }
         }
 

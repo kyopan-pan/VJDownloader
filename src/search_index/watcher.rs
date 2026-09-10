@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use super::normalize::{epoch_millis, is_supported_video_path, path_to_key};
 use super::scanner::{
-    build_record_from_path, find_root_id_for_path, trigger_reindex_all_from_db, upsert_directory,
+    build_record, find_root_id_for_path, trigger_reindex_all_from_db, upsert_directory,
 };
 use super::{
     DEBOUNCE_WINDOW, EngineResult, PendingChanges, WatchedRoot, WatcherMessage, WriteCommand,
@@ -176,7 +176,7 @@ fn flush_pending_changes(
             }
 
             if let Some(root_id) = find_root_id_for_path(&path, roots)
-                && let Some(record) = build_record_from_path(root_id, &path, epoch_millis(), None)
+                && let Some(record) = build_record(root_id, &path, &metadata, epoch_millis(), None)
             {
                 write_tx
                     .send(WriteCommand::UpsertFiles {
@@ -278,7 +278,7 @@ pub(super) fn apply_upsert_change(
         return Ok(());
     };
 
-    if let Some(record) = build_record_from_path(root_id, new_path, epoch_millis(), None) {
+    if let Some(record) = build_record(root_id, new_path, &metadata, epoch_millis(), None) {
         write_tx
             .send(WriteCommand::UpsertFiles {
                 files: vec![record],

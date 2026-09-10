@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use super::db::{apply_migrations, open_connection};
-use super::normalize::escape_like_pattern;
 use super::{EngineResult, WriteCommand};
 
 // 書き込み専用スレッドでコマンドを順次適用する。
@@ -28,6 +27,15 @@ pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
             crate::log_error!(Search, "検索インデックスの更新に失敗しました: {err}");
         }
     }
+}
+
+// あるパス配下（`prefix` + 区切り文字で始まる）だけを含む、BINARY 照合での半開区間を返す。
+// 区切り文字は ASCII なので、上限は区切り文字を1つ進めた文字で作れる。
+fn descendant_path_range(prefix: &str) -> (String, String) {
+    let sep = if prefix.contains('\\') { b'\\' } else { b'/' };
+    let lower = format!("{prefix}{}", sep as char);
+    let upper = format!("{prefix}{}", (sep + 1) as char);
+    (lower, upper)
 }
 
 // 受信した DB 更新コマンドをトランザクション付きで実行する。
@@ -148,14 +156,15 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
             }
             let tx = conn.transaction().map_err(|err| err.to_string())?;
             {
+                // LIKE の前方一致は OR と ESCAPE のせいで索引が使えず、プレフィックス1件ごとに
+                // files を全走査してしまう。主キー path は BINARY 照合なので、配下の判定を
+                // 範囲比較へ置き換えて主キー索引で引けるようにする。
                 let mut stmt = tx
-                    .prepare("DELETE FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'")
+                    .prepare("DELETE FROM files WHERE path = ? OR (path >= ? AND path < ?)")
                     .map_err(|err| err.to_string())?;
                 for prefix in prefixes {
-                    let sep = if prefix.contains('\\') { '\\' } else { '/' };
-                    let escaped = escape_like_pattern(&prefix);
-                    let pattern = format!("{escaped}{sep}%");
-                    stmt.execute(params![prefix, pattern])
+                    let (lower, upper) = descendant_path_range(&prefix);
+                    stmt.execute(params![prefix, lower, upper])
                         .map_err(|err| err.to_string())?;
                 }
             }
@@ -187,4 +196,39 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
         WriteCommand::Shutdown => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::descendant_path_range;
+
+    fn in_range(path: &str, prefix: &str) -> bool {
+        let (lower, upper) = descendant_path_range(prefix);
+        path >= lower.as_str() && path < upper.as_str()
+    }
+
+    #[test]
+    fn range_covers_only_descendants() {
+        for (prefix, inside, outside) in [
+            (
+                "E:\\videos\\live",
+                ["E:\\videos\\live\\a.mp4", "E:\\videos\\live\\sub\\b.mp4"],
+                ["E:\\videos\\live2\\a.mp4", "E:\\videos\\lit\\a.mp4"],
+            ),
+            (
+                "/Users/vj/videos",
+                ["/Users/vj/videos/a.mp4", "/Users/vj/videos/sub/b.mp4"],
+                ["/Users/vj/videos2/a.mp4", "/Users/vj/video/a.mp4"],
+            ),
+        ] {
+            for path in inside {
+                assert!(in_range(path, prefix), "{path} は {prefix} 配下");
+            }
+            for path in outside {
+                assert!(!in_range(path, prefix), "{path} は {prefix} 配下ではない");
+            }
+            // ルート自身は範囲に含めず、呼び出し側が path = ? で別途消す。
+            assert!(!in_range(prefix, prefix));
+        }
+    }
 }
