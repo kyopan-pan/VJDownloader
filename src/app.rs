@@ -12,6 +12,8 @@ use crate::paths::{search_index_db_path, yt_dlp_path};
 use crate::platform::input_source::{InputMode, current_mode};
 use crate::platform::menu as mac_menu;
 use crate::platform::window as mac_window;
+use crate::search_index::ui as index_progress_ui;
+use crate::search_index::ui::IndexProgressUiState;
 use crate::search_index::{
     IndexEvent, IndexEventTarget, SearchEngine, SearchHit, SearchRequest, SearchSort,
 };
@@ -138,6 +140,7 @@ pub struct DownloaderApp {
     pub(crate) search_engine: Option<SearchEngine>,
     pub(crate) search_roots_sync_error: Option<String>,
     pub(crate) index_update_state: IndexUpdateState,
+    index_progress_ui: Arc<Mutex<IndexProgressUiState>>,
     index_event_rx: Option<mpsc::Receiver<IndexEvent>>,
     active_index_updates: usize,
     index_update_error: Option<String>,
@@ -235,6 +238,7 @@ impl DownloaderApp {
             search_engine,
             search_roots_sync_error,
             index_update_state: IndexUpdateState::Idle,
+            index_progress_ui: Arc::new(Mutex::new(IndexProgressUiState::new())),
             index_event_rx,
             active_index_updates: 0,
             index_update_error: None,
@@ -647,6 +651,21 @@ impl DownloaderApp {
         }
     }
 
+    // 進捗ミニウィンドウへ最新の進み具合を渡す。コメント補完は数時間続くことがあるため、
+    // 完了通知（IndexEvent）とは別に毎フレーム値を反映する。
+    fn poll_index_progress(&mut self, ctx: &egui::Context) {
+        let Some(engine) = self.search_engine.as_ref() else {
+            return;
+        };
+        let progress = engine.progress();
+        if let Ok(mut state) = self.index_progress_ui.lock() {
+            state.update(progress);
+        }
+        if progress.is_active() {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+    }
+
     fn maintain_cursor_tracking(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.focused);
         let focus_changed = self.last_focus_state != Some(focused);
@@ -715,8 +734,10 @@ impl eframe::App for DownloaderApp {
         self.refresh_downloads_if_needed();
         self.poll_search_results();
         self.poll_index_events(&ctx);
+        self.poll_index_progress(&ctx);
         self.submit_search_if_needed();
         ui::render(self, root_ui, frame);
+        index_progress_ui::render_index_progress_viewport(&self.index_progress_ui, &ctx);
         speed_test_ui::render_speed_test_viewport(&self.speed_test_ui, &ctx);
         stream_ui::render_stream_viewport(&self.stream_ui, self.cookie_args.clone(), &ctx);
         render_converter_viewport(&self.converter_ui, &ctx);

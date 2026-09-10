@@ -32,7 +32,7 @@ cargo test search_index -- --test-threads=1
 - DB: SQLite（`~/.vjdownloader/search_index.sqlite3`）
 - 書き込み: 単一ライタースレッド（キュー経由）
 - 読み取り: 検索ワーカーでクエリ実行
-- 初回/再構築: `walkdir`でフルスキャン
+- 初回/再構築: `walkdir`でフルスキャン（フェーズ1）+ `ffprobe`によるコメント後埋め（フェーズ2）
 - 差分更新: `notify` + デバウンス
 
 ### SQLiteを使う理由
@@ -43,6 +43,22 @@ cargo test search_index -- --test-threads=1
 ### 単一ライタースレッドにする理由
 - SQLiteは同時書き込みを許さない。フルスキャン・差分更新・ルート同期がいずれも書き込むため、
   キューで直列化して呼び出し側からロック競合とリトライを消している
+
+### インデックス作成を2段階に分ける理由
+- コメント取得には1ファイルにつき1回 `ffprobe` プロセスを起動する必要がある。10万件規模だと
+  プロセス起動とHDDのランダムシークだけで数時間かかり、1段階のままでは検索が
+  まったく使えない時間がその長さぶん続く
+- フェーズ1（`scanner.rs`）はファイルの内容を読まず、`walkdir`の列挙結果だけで
+  `files`を更新する。数分で終わり、この時点でファイル名検索が使えるようになる
+- フェーズ2（`comments.rs`）は`comment_norm IS NULL`の行を拾って`ffprobe`にかける。
+  進行状態はDB上にあるので、途中で終了しても次回起動時に続きから再開できる
+- フェーズ1は未変更ファイル（サイズと更新日時が一致）のコメントをSQLの`CASE`で残す。
+  以前は前回分を`HashMap`へ全件読み込んでいたが、12万件・コメント1.5KB想定で
+  約880MBのメモリを走査中ずっと保持していた
+- フェーズ2は`ffprobe`をワーカースレッドで並列に走らせる。プロセス起動とファイル読み取りの
+  待ちが大半なので並列化が効く。上限は`MAX_COMMENT_WORKERS`
+- 1バッチ書き込むごとに writer の応答を待ってから次のバッチを引く。待たずに再検索すると
+  まだコミットされていない同じ行を引き当てて同じファイルを繰り返し処理してしまう
 
 ### 大量ファイル向けの実装上の注意
 - `open_connection`で`case_sensitive_like=ON`を設定している。`LIKE`は既定で大小文字を区別せず、
@@ -67,7 +83,9 @@ cargo test search_index -- --test-threads=1
 - それでもDBが実体とずれた場合は、設定画面の`全体を再インデックス`で復旧できます
 
 ## 大規模フォルダ運用の注意
-- 初回スキャン時間はファイル数に比例して増加します
+- フェーズ1（ファイル名インデックス）はファイル数に比例しますが、内容を読まないため短時間で終わります
+- フェーズ2（コメント取得）は1ファイルにつき`ffprobe`を1回起動するため、10万件規模では数時間かかります。
+  この間もファイル名検索とダウンロードは通常どおり使えます
 - ルートを絞るほどDBサイズと更新負荷を抑えられます
 - 不要ディレクトリは検索対象ルートに含めない運用を推奨
 
@@ -90,6 +108,9 @@ cargo test search_index -- --test-threads=1
 | `normalize_for_search` | NFKC + lower + カタカナのひらがな化 | 検索正規化方式 |
 | `DEBOUNCE_WINDOW` | 700ms | 監視イベントのデバウンス幅 |
 | `UPSERT_BATCH_SIZE` | 256 | バッチupsert件数 |
+| `COMMENT_BATCH_SIZE` | 256 | フェーズ2で1度に取り出すコメント取得待ちの件数 |
+| `MAX_COMMENT_WORKERS` | 4 | フェーズ2の`ffprobe`同時実行数の上限 |
+| `STALLED_ROUND_LIMIT` | 3 | フェーズ2で残件数が減らないまま許容する連続回数 |
 | `FFPROBE_TIMEOUT` | 30s | 1ファイルあたりの`ffprobe`応答待ち上限 |
 | `MAX_SEARCH_LIMIT` | 1000 | 1回の検索で返す最大件数 |
 
@@ -101,7 +122,9 @@ cargo test search_index -- --test-threads=1
 - `src/search_index/db.rs`: SQLiteスキーマとクエリ実行
 - `src/search_index/normalize.rs`: NFKC + lower + ひらがな化の正規化
 - `src/search_index/query.rs`: 検索クエリの解析
-- `src/search_index/scanner.rs`: `walkdir`によるフルスキャン
+- `src/search_index/scanner.rs`: `walkdir`によるフルスキャン（フェーズ1）
+- `src/search_index/comments.rs`: `ffprobe`による動画コメントの後埋め（フェーズ2）
+- `src/search_index/ui.rs`: インデックス作成の進捗ミニウィンドウ
 - `src/search_index/watcher.rs`: `notify`監視とデバウンス
 - `src/search_index/writer.rs`: 単一ライタースレッド
 - `src/settings/ui.rs`: 検索対象フォルダの追加・削除、全体を再インデックスのUI

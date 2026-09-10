@@ -81,6 +81,19 @@ pub(super) fn apply_migrations(conn: &Connection) -> EngineResult<()> {
         .map_err(|err| err.to_string())?;
     }
 
+    if version < 3 {
+        // コメント未取得の行だけを持つ部分索引。取得待ちの抽出と残件数の集計を
+        // files の全走査なしに行うために置く。処理が進むほど索引自体が縮む。
+        conn.execute_batch(
+            "BEGIN;
+            CREATE INDEX IF NOT EXISTS idx_files_comment_pending
+                ON files(path) WHERE comment_norm IS NULL;
+            PRAGMA user_version = 3;
+            COMMIT;",
+        )
+        .map_err(|err| err.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -88,7 +101,7 @@ pub(super) fn apply_migrations(conn: &Connection) -> EngineResult<()> {
 mod tests {
     use rusqlite::Connection;
 
-    use super::apply_migrations;
+    use super::{DB_SCHEMA_VERSION, apply_migrations};
 
     #[test]
     fn migrates_existing_index_to_comment_columns() {
@@ -120,7 +133,7 @@ mod tests {
         let version: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read schema version");
-        assert_eq!(version, 2);
+        assert_eq!(version, DB_SCHEMA_VERSION);
 
         let mut stmt = conn
             .prepare("SELECT name FROM pragma_table_info('files')")

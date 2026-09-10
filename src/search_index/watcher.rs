@@ -3,7 +3,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
 use super::normalize::{epoch_millis, is_supported_video_path, path_to_key};
@@ -11,15 +11,12 @@ use super::scanner::{
     build_record, find_root_id_for_path, trigger_reindex_all_from_db, upsert_directory,
 };
 use super::{
-    DEBOUNCE_WINDOW, EngineResult, PendingChanges, WatchedRoot, WatcherMessage, WriteCommand,
+    DEBOUNCE_WINDOW, EngineResult, PendingChanges, ScanContext, WatchedRoot, WatcherMessage,
+    WriteCommand,
 };
 
 // notify のイベントを受け取り、debounce 後に差分更新コマンドへ変換する。
-pub(super) fn watcher_loop(
-    rx: Receiver<WatcherMessage>,
-    write_tx: Sender<WriteCommand>,
-    db_path: PathBuf,
-) {
+pub(super) fn watcher_loop(rx: Receiver<WatcherMessage>, context: ScanContext) {
     let (event_tx, event_rx) = mpsc::channel();
     let callback_tx = event_tx.clone();
     let mut watcher = match RecommendedWatcher::new(
@@ -57,20 +54,24 @@ pub(super) fn watcher_loop(
                     Search,
                     "フォルダ監視のイベント取得に失敗しました。全体を再走査します: {err}"
                 );
-                trigger_reindex_all_from_db(&db_path, &write_tx);
+                trigger_reindex_all_from_db(&context);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
 
-        if should_flush_pending(&pending)
-            && let Err(err) = flush_pending_changes(&mut pending, &watched_roots, &write_tx)
-        {
-            crate::log_warn!(
-                Search,
-                "監視結果の反映に失敗しました。全体を再走査します: {err}"
-            );
-            trigger_reindex_all_from_db(&db_path, &write_tx);
+        if should_flush_pending(&pending) {
+            match flush_pending_changes(&mut pending, &watched_roots, &context) {
+                // 差分で入った行はコメントが未取得なので、フェーズ2に拾わせる。
+                Ok(()) => context.kick_comment_backfill(),
+                Err(err) => {
+                    crate::log_warn!(
+                        Search,
+                        "監視結果の反映に失敗しました。全体を再走査します: {err}"
+                    );
+                    trigger_reindex_all_from_db(&context);
+                }
+            }
         }
     }
 }
@@ -140,8 +141,9 @@ fn should_flush_pending(pending: &PendingChanges) -> bool {
 fn flush_pending_changes(
     pending: &mut PendingChanges,
     roots: &[WatchedRoot],
-    write_tx: &Sender<WriteCommand>,
+    context: &ScanContext,
 ) -> EngineResult<()> {
+    let write_tx = &context.write_tx;
     let mut delete_paths = HashSet::<String>::new();
     let mut delete_prefixes = HashSet::<String>::new();
     let mut upsert_paths = HashSet::<PathBuf>::new();
@@ -167,7 +169,7 @@ fn flush_pending_changes(
             };
 
             if metadata.is_dir() {
-                upsert_directory(&path, roots, write_tx)?;
+                upsert_directory(&path, roots, context)?;
                 continue;
             }
 
@@ -176,7 +178,7 @@ fn flush_pending_changes(
             }
 
             if let Some(root_id) = find_root_id_for_path(&path, roots)
-                && let Some(record) = build_record(root_id, &path, &metadata, epoch_millis(), None)
+                && let Some(record) = build_record(root_id, &path, &metadata, epoch_millis())
             {
                 write_tx
                     .send(WriteCommand::UpsertFiles {
@@ -232,11 +234,8 @@ fn collect_delete_target(
 
 #[cfg(test)]
 // テスト用: 削除変更を write コマンドへ直接変換する。
-pub(super) fn apply_delete_change(
-    old_path: &Path,
-    _roots: &[WatchedRoot],
-    write_tx: &Sender<WriteCommand>,
-) -> EngineResult<()> {
+pub(super) fn apply_delete_change(old_path: &Path, context: &ScanContext) -> EngineResult<()> {
+    let write_tx = &context.write_tx;
     if old_path.is_dir() {
         write_tx
             .send(WriteCommand::DeleteByPrefixes {
@@ -259,7 +258,7 @@ pub(super) fn apply_delete_change(
 pub(super) fn apply_upsert_change(
     new_path: &Path,
     roots: &[WatchedRoot],
-    write_tx: &Sender<WriteCommand>,
+    context: &ScanContext,
 ) -> EngineResult<()> {
     if !new_path.exists() {
         return Ok(());
@@ -267,7 +266,7 @@ pub(super) fn apply_upsert_change(
 
     let metadata = fs::metadata(new_path).map_err(|err| err.to_string())?;
     if metadata.is_dir() {
-        return upsert_directory(new_path, roots, write_tx);
+        return upsert_directory(new_path, roots, context);
     }
 
     if !is_supported_video_path(new_path) {
@@ -278,8 +277,9 @@ pub(super) fn apply_upsert_change(
         return Ok(());
     };
 
-    if let Some(record) = build_record(root_id, new_path, &metadata, epoch_millis(), None) {
-        write_tx
+    if let Some(record) = build_record(root_id, new_path, &metadata, epoch_millis()) {
+        context
+            .write_tx
             .send(WriteCommand::UpsertFiles {
                 files: vec![record],
             })

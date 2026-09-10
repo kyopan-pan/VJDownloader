@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use super::db::{apply_migrations, open_connection};
-use super::{EngineResult, WriteCommand};
+use super::{CommentRecord, EngineResult, WriteCommand};
 
 // 書き込み専用スレッドでコマンドを順次適用する。
 pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
@@ -27,6 +27,38 @@ pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
             crate::log_error!(Search, "検索インデックスの更新に失敗しました: {err}");
         }
     }
+}
+
+// フェーズ2（コメント補完）の書き込み。
+fn upsert_comments(conn: &mut Connection, comments: Vec<CommentRecord>) -> EngineResult<()> {
+    if comments.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    {
+        // ffprobe 実行中に監視側が同じ行を更新していることがあるため、読み出した時点の
+        // サイズと更新日時が一致する行だけを更新して、古い内容の上書きを防ぐ。
+        let mut stmt = tx
+            .prepare(
+                "UPDATE files
+                 SET comment = ?, comment_norm = ?
+                 WHERE path = ? AND size_bytes = ? AND modified_time = ?",
+            )
+            .map_err(|err| err.to_string())?;
+
+        for comment in comments {
+            stmt.execute(params![
+                comment.comment,
+                comment.comment_norm,
+                comment.path,
+                comment.size_bytes,
+                comment.modified_time
+            ])
+            .map_err(|err| err.to_string())?;
+        }
+    }
+    tx.commit().map_err(|err| err.to_string())
 }
 
 // あるパス配下（`prefix` + 区切り文字で始まる）だけを含む、BINARY 照合での半開区間を返す。
@@ -86,6 +118,9 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
 
             let tx = conn.transaction().map_err(|err| err.to_string())?;
             {
+                // フェーズ1（ファイル名インデックス）の書き込み。コメント列は触らない。
+                // サイズと更新日時が変わっていない行は取得済みコメントをそのまま残し、
+                // 変わっていれば NULL に戻してフェーズ2の取得待ちへ入れる。
                 let mut stmt = tx
                     .prepare(
                         "INSERT INTO files (
@@ -93,21 +128,31 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
                             root_id,
                             file_name,
                             file_name_norm,
-                            comment,
-                            comment_norm,
                             parent_dir,
                             size_bytes,
                             modified_time,
                             created_time,
-                            last_indexed_time
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            last_indexed_time,
+                            comment,
+                            comment_norm
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL)
                         ON CONFLICT(path) DO UPDATE SET
                             root_id = excluded.root_id,
                             file_name = excluded.file_name,
                             file_name_norm = excluded.file_name_norm,
-                            comment = excluded.comment,
-                            comment_norm = excluded.comment_norm,
                             parent_dir = excluded.parent_dir,
+                            comment = CASE
+                                WHEN files.size_bytes = excluded.size_bytes
+                                     AND files.modified_time = excluded.modified_time
+                                THEN files.comment
+                                ELSE ''
+                            END,
+                            comment_norm = CASE
+                                WHEN files.size_bytes = excluded.size_bytes
+                                     AND files.modified_time = excluded.modified_time
+                                THEN files.comment_norm
+                                ELSE NULL
+                            END,
                             size_bytes = excluded.size_bytes,
                             modified_time = excluded.modified_time,
                             created_time = excluded.created_time,
@@ -121,8 +166,6 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
                         file.root_id,
                         file.file_name,
                         file.file_name_norm,
-                        file.comment,
-                        file.comment_norm,
                         file.parent_dir,
                         file.size_bytes,
                         file.modified_time,
@@ -133,6 +176,11 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
                 }
             }
             tx.commit().map_err(|err| err.to_string())?;
+        }
+        WriteCommand::UpsertComments { comments, resp } => {
+            let result = upsert_comments(conn, comments);
+            let _ = resp.send(result.clone());
+            result?;
         }
         WriteCommand::DeletePaths { paths } => {
             if paths.is_empty() {
@@ -200,7 +248,118 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
 
 #[cfg(test)]
 mod tests {
-    use super::descendant_path_range;
+    use rusqlite::Connection;
+    use std::sync::mpsc;
+
+    use super::super::db::apply_migrations;
+    use super::super::{CommentRecord, FileRecord, WriteCommand};
+    use super::{apply_write_command, descendant_path_range};
+
+    fn file_record(size_bytes: i64, modified_time: i64) -> FileRecord {
+        FileRecord {
+            path: "/videos/a.mp4".to_string(),
+            root_id: 1,
+            file_name: "a.mp4".to_string(),
+            file_name_norm: "a.mp4".to_string(),
+            parent_dir: "/videos".to_string(),
+            size_bytes,
+            modified_time,
+            created_time: None,
+            last_indexed_time: 1,
+        }
+    }
+
+    fn setup_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open DB");
+        apply_migrations(&conn).expect("migrate");
+        conn.execute("INSERT INTO roots (root_path) VALUES ('/videos')", [])
+            .expect("insert root");
+        conn
+    }
+
+    fn stored_comment(conn: &Connection) -> (String, Option<String>) {
+        conn.query_row(
+            "SELECT comment, comment_norm FROM files WHERE path = '/videos/a.mp4'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read comment")
+    }
+
+    fn upsert_comment(conn: &mut Connection, size_bytes: i64, modified_time: i64) {
+        let (tx, rx) = mpsc::channel();
+        apply_write_command(
+            conn,
+            WriteCommand::UpsertComments {
+                comments: vec![CommentRecord {
+                    path: "/videos/a.mp4".to_string(),
+                    size_bytes,
+                    modified_time,
+                    comment: "概要欄".to_string(),
+                    comment_norm: "概要欄".to_string(),
+                }],
+                resp: tx,
+            },
+        )
+        .expect("upsert comments");
+        rx.recv().expect("response").expect("commit");
+    }
+
+    fn upsert_file(conn: &mut Connection, size_bytes: i64, modified_time: i64) {
+        apply_write_command(
+            conn,
+            WriteCommand::UpsertFiles {
+                files: vec![file_record(size_bytes, modified_time)],
+            },
+        )
+        .expect("upsert files");
+    }
+
+    #[test]
+    fn phase1_upsert_leaves_new_rows_waiting_for_comments() {
+        let mut conn = setup_conn();
+        upsert_file(&mut conn, 100, 10);
+        assert_eq!(stored_comment(&conn), (String::new(), None));
+    }
+
+    #[test]
+    fn phase1_upsert_keeps_comments_of_unchanged_files() {
+        let mut conn = setup_conn();
+        upsert_file(&mut conn, 100, 10);
+        upsert_comment(&mut conn, 100, 10);
+
+        // 実体が変わっていない再走査ではコメントを取り直させない。
+        upsert_file(&mut conn, 100, 10);
+        assert_eq!(
+            stored_comment(&conn),
+            ("概要欄".to_string(), Some("概要欄".to_string()))
+        );
+    }
+
+    #[test]
+    fn phase1_upsert_clears_comments_of_changed_files() {
+        let mut conn = setup_conn();
+        upsert_file(&mut conn, 100, 10);
+        upsert_comment(&mut conn, 100, 10);
+
+        // サイズが変わったら取得し直させる。
+        upsert_file(&mut conn, 200, 10);
+        assert_eq!(stored_comment(&conn), (String::new(), None));
+
+        upsert_comment(&mut conn, 200, 10);
+        // 更新日時が変わった場合も同じ。
+        upsert_file(&mut conn, 200, 20);
+        assert_eq!(stored_comment(&conn), (String::new(), None));
+    }
+
+    #[test]
+    fn comment_upsert_skips_rows_that_changed_while_probing() {
+        let mut conn = setup_conn();
+        upsert_file(&mut conn, 100, 10);
+        // ffprobe 実行中に実体が差し替わった想定。読み出し時点の値では更新させない。
+        upsert_comment(&mut conn, 999, 999);
+        assert_eq!(stored_comment(&conn), (String::new(), None));
+    }
 
     fn in_range(path: &str, prefix: &str) -> bool {
         let (lower, upper) = descendant_path_range(prefix);
