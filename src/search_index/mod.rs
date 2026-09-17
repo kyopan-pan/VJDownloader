@@ -1,18 +1,22 @@
+mod comments;
 mod db;
 mod normalize;
 mod query;
 mod scanner;
+pub mod ui;
 mod watcher;
 mod writer;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use comments::{BackfillMessage, comment_backfill_loop};
 use db::{apply_migrations, open_connection};
 use normalize::{escape_like_pattern, normalize_query, normalize_root_path, path_to_key};
 use query::{QueryPattern, run_search_query};
@@ -20,9 +24,18 @@ use scanner::scan_root;
 use watcher::watcher_loop;
 use writer::writer_loop;
 
-const DB_SCHEMA_VERSION: i32 = 2;
+const DB_SCHEMA_VERSION: i32 = 3;
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(700);
 const UPSERT_BATCH_SIZE: usize = 256;
+// 応答しない ffprobe でスキャンが止まらないようにする上限。moov アトムの読み取りは
+// 低速なHDDでも数秒で終わるため、これを超えるものは異常とみなして打ち切る。
+const FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
+// フェーズ2で1度に取り出すコメント取得待ちの件数。
+const COMMENT_BATCH_SIZE: usize = 256;
+// フェーズ2で同時に走らせる ffprobe の数の上限。ffprobe はプロセス起動と
+// ファイル読み取りの待ちが大半なので並列化が効くが、HDDのランダムシークが
+// 律速になるため増やしすぎても頭打ちになる。
+const MAX_COMMENT_WORKERS: usize = 4;
 const MAX_SEARCH_LIMIT: usize = 1_000;
 
 pub type EngineResult<T> = Result<T, String>;
@@ -36,6 +49,45 @@ pub enum IndexEvent {
         target: IndexEventTarget,
         result: EngineResult<()>,
     },
+}
+
+// フルスキャンをどのルートに対して起こすか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanTrigger {
+    // 今回新しく追加されたルートだけを走査する。
+    NewRootsOnly,
+    // 有効なルートすべてを走査する。
+    AllRoots,
+}
+
+// インデックス作成の進捗。UI が毎フレーム読み取れるよう、値だけの複製可能な型にする。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexProgress {
+    // フェーズ1（ファイル名インデックス）を実行中のルート数。
+    pub scanning_roots: usize,
+    // フェーズ1で積み上げたファイル数。総数は走査し終えるまで分からないため件数のみ。
+    pub scanned_files: u64,
+    // フェーズ2（コメント補完）が動いているか。
+    pub comment_running: bool,
+    // フェーズ2で処理を終えた件数と、残っている件数。
+    pub comment_done: u64,
+    pub comment_pending: u64,
+}
+
+impl IndexProgress {
+    // 進捗ウィンドウを出すべき状態かどうか。
+    pub fn is_active(&self) -> bool {
+        self.scanning_roots > 0 || self.comment_running
+    }
+
+    // フェーズ2の進捗率。総数が分からないうちは None。
+    pub fn comment_ratio(&self) -> Option<f32> {
+        let total = self.comment_done + self.comment_pending;
+        if total == 0 {
+            return None;
+        }
+        Some(self.comment_done as f32 / total as f32)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +163,7 @@ struct EngineInner {
     db_path: PathBuf,
     write_tx: Sender<WriteCommand>,
     watcher_tx: Sender<WatcherMessage>,
+    scan_context: ScanContext,
     index_event_txs: Mutex<Vec<Sender<IndexEvent>>>,
 }
 
@@ -127,6 +180,16 @@ enum WriteCommand {
     UpsertFiles {
         files: Vec<FileRecord>,
     },
+    // 先行する書き込みがコミットされた後にフェーズ2へ Kick を送らせる。
+    // 呼び出し側から直接 Kick すると、まだコミットされていない取得待ちを
+    // 見落として0件で終わり、次の Kick も起きないまま取り残される。
+    NotifyCommentPending,
+    UpsertComments {
+        comments: Vec<CommentRecord>,
+        // 反映を待ってから次のバッチを引くための応答口。待たずに再検索すると
+        // まだコミットされていない同じ行を引き当てて延々と処理し続けてしまう。
+        resp: Sender<EngineResult<()>>,
+    },
     DeletePaths {
         paths: Vec<String>,
     },
@@ -142,19 +205,61 @@ enum WriteCommand {
     Shutdown,
 }
 
+// フェーズ1（ファイル名インデックス）で書き込むレコード。コメントは持たない。
 #[derive(Clone, Debug)]
 struct FileRecord {
     path: String,
     root_id: i64,
     file_name: String,
     file_name_norm: String,
-    comment: String,
-    comment_norm: Option<String>,
     parent_dir: String,
     size_bytes: i64,
     modified_time: i64,
     created_time: Option<i64>,
     last_indexed_time: i64,
+}
+
+// フェーズ2（コメント補完）で書き込むレコード。
+#[derive(Clone, Debug)]
+struct CommentRecord {
+    path: String,
+    size_bytes: i64,
+    modified_time: i64,
+    comment: String,
+    comment_norm: String,
+}
+
+// フェーズ1の走査スレッドと watcher が共通で必要とする書き込み先と共有状態。
+// 個別に引数で回すと関数の引数が増えすぎるため、1つにまとめて持ち回る。
+#[derive(Clone)]
+struct ScanContext {
+    db_path: PathBuf,
+    write_tx: Sender<WriteCommand>,
+    backfill_tx: Sender<BackfillMessage>,
+    progress: Arc<Mutex<IndexProgress>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl ScanContext {
+    // フェーズ2に取りこぼしがないか確認させる。writer へ積んだ書き込みが
+    // コミット済みであることが確かな場所からだけ呼ぶ。
+    fn kick_comment_backfill(&self) {
+        let _ = self.backfill_tx.send(BackfillMessage::Kick);
+    }
+
+    // 直前に writer へ積んだ書き込みのコミット後にフェーズ2を起こす。
+    // writer は受信順に処理するため、この通知が処理される時点で先行分は反映済み。
+    fn kick_comment_backfill_after_writes(&self) {
+        let _ = self.write_tx.send(WriteCommand::NotifyCommentPending);
+    }
+
+    fn update_progress(&self, edit: impl FnOnce(&mut IndexProgress)) {
+        update_progress(&self.progress, edit);
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.shutdown.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -187,26 +292,67 @@ impl SearchEngine {
         apply_migrations(&conn)?;
         drop(conn);
 
+        let (backfill_tx, backfill_rx) = mpsc::channel();
         let (write_tx, write_rx) = mpsc::channel();
         let db_for_writer = db_path.clone();
-        thread::spawn(move || writer_loop(db_for_writer, write_rx));
+        let backfill_tx_for_writer = backfill_tx.clone();
+        thread::spawn(move || writer_loop(db_for_writer, write_rx, backfill_tx_for_writer));
+
+        let progress = Arc::new(Mutex::new(IndexProgress::default()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let scan_context = ScanContext {
+            db_path: db_path.clone(),
+            write_tx: write_tx.clone(),
+            backfill_tx,
+            progress,
+            shutdown,
+        };
+
+        let backfill_context = scan_context.clone();
+        thread::spawn(move || {
+            comment_backfill_loop(
+                backfill_rx,
+                backfill_context.db_path,
+                backfill_context.write_tx,
+                backfill_context.progress,
+                backfill_context.shutdown,
+            )
+        });
 
         let (watcher_tx, watcher_rx) = mpsc::channel();
-        let watcher_write_tx = write_tx.clone();
-        let watcher_db = db_path.clone();
-        thread::spawn(move || watcher_loop(watcher_rx, watcher_write_tx, watcher_db));
+        let watcher_context = scan_context.clone();
+        thread::spawn(move || watcher_loop(watcher_rx, watcher_context));
 
         let engine = Self {
             inner: Arc::new(EngineInner {
                 db_path,
                 write_tx,
                 watcher_tx,
+                scan_context,
                 index_event_txs: Mutex::new(Vec::new()),
             }),
         };
 
         engine.refresh_watcher_roots()?;
+        // 前回の終了で取り残したコメント取得待ちを引き継ぐ。
+        engine.inner.scan_context.kick_comment_backfill();
         Ok(engine)
+    }
+
+    // ffprobe の導入待ちで保留したコメント取得を、外部の準備完了に合わせて起こす。
+    pub fn resume_comment_backfill(&self) {
+        self.inner.scan_context.kick_comment_backfill();
+    }
+
+    // 進捗ウィンドウ用に現在の進捗を複製して返す。毎フレーム呼ばれるため軽い処理に保つ。
+    pub fn progress(&self) -> IndexProgress {
+        self.inner
+            .scan_context
+            .progress
+            .lock()
+            .map(|progress| *progress)
+            .unwrap_or_default()
     }
 
     // UIがフルスキャンの開始・完了を受け取るための購読チャンネルを作る。
@@ -246,19 +392,25 @@ impl SearchEngine {
         Ok(entries)
     }
 
-    // desired ルート集合と DB の差分を同期し、必要な full scan を起動する。
-    pub fn sync_roots(&self, desired_paths: &[PathBuf]) -> EngineResult<()> {
-        self.sync_roots_with_target(desired_paths, IndexEventTarget::Main)
+    // 起動時用。ルート同期と全ルートのスキャンを1回の呼び出しでまとめる。
+    // sync_roots と reindex_all_async を続けて呼ぶと、新規追加ルートを二重に走査してしまう。
+    pub fn sync_roots_and_rescan(&self, desired_paths: &[PathBuf]) -> EngineResult<()> {
+        self.sync_roots_with_target(desired_paths, IndexEventTarget::Main, ScanTrigger::AllRoots)
     }
 
     pub fn sync_roots_from_settings(&self, desired_paths: &[PathBuf]) -> EngineResult<()> {
-        self.sync_roots_with_target(desired_paths, IndexEventTarget::Settings)
+        self.sync_roots_with_target(
+            desired_paths,
+            IndexEventTarget::Settings,
+            ScanTrigger::NewRootsOnly,
+        )
     }
 
     fn sync_roots_with_target(
         &self,
         desired_paths: &[PathBuf],
         target: IndexEventTarget,
+        trigger: ScanTrigger,
     ) -> EngineResult<()> {
         let mut normalized_paths = Vec::new();
         let mut dedup = HashSet::new();
@@ -293,7 +445,7 @@ impl SearchEngine {
         for (path, key) in &normalized_paths {
             let added_now = !current_map.contains_key(key);
             let root_id = self.add_or_enable_root(key)?;
-            if added_now {
+            if added_now || matches!(trigger, ScanTrigger::AllRoots) {
                 self.start_full_scan(root_id, path.clone(), target);
                 scan_started = true;
             }
@@ -320,6 +472,7 @@ impl SearchEngine {
     }
 
     // 有効ルートすべてに対して再インデックスを非同期起動する。
+    #[cfg(test)]
     pub fn reindex_all_async(&self) -> EngineResult<()> {
         self.reindex_all_async_for(IndexEventTarget::Main)
             .map(|_| ())
@@ -413,10 +566,10 @@ impl SearchEngine {
     ) -> EngineResult<()> {
         let roots = self.enabled_watched_roots()?;
         if let Some(old) = old_path {
-            watcher::apply_delete_change(old, &roots, &self.inner.write_tx)?;
+            watcher::apply_delete_change(old, &self.inner.scan_context)?;
         }
         if let Some(new_path) = new_path {
-            watcher::apply_upsert_change(new_path, &roots, &self.inner.write_tx)?;
+            watcher::apply_upsert_change(new_path, &roots, &self.inner.scan_context)?;
         }
         Ok(())
     }
@@ -463,14 +616,16 @@ impl SearchEngine {
             .collect())
     }
 
-    // ルート単位の full scan をバックグラウンドで起動する。
+    // ルート単位のフェーズ1（ファイル名インデックス）をバックグラウンドで起動する。
     fn start_full_scan(&self, root_id: i64, root_path: PathBuf, target: IndexEventTarget) {
-        let write_tx = self.inner.write_tx.clone();
-        let db_path = self.inner.db_path.clone();
         self.notify_index_event(IndexEvent::UpdateStarted { target });
         let engine = self.clone();
+        let context = self.inner.scan_context.clone();
+        context.update_progress(|progress| {
+            progress.scanning_roots = progress.scanning_roots.saturating_add(1);
+        });
         thread::spawn(move || {
-            let result = scan_root(root_id, &root_path, &db_path, &write_tx);
+            let result = scan_root(root_id, &root_path, &context);
             if let Err(err) = &result {
                 crate::log_error!(
                     Search,
@@ -478,6 +633,14 @@ impl SearchEngine {
                     root_path.to_string_lossy()
                 );
             }
+            context.update_progress(|progress| {
+                progress.scanning_roots = progress.scanning_roots.saturating_sub(1);
+                if progress.scanning_roots == 0 {
+                    progress.scanned_files = 0;
+                }
+            });
+            // ファイル名の反映が済んだので、増えたコメント取得待ちを拾わせる。
+            context.kick_comment_backfill();
             engine.notify_index_event(IndexEvent::UpdateFinished { target, result });
         });
     }
@@ -491,8 +654,20 @@ impl SearchEngine {
 
 impl Drop for EngineInner {
     fn drop(&mut self) {
+        self.scan_context.shutdown.store(true, Ordering::Relaxed);
+        let _ = self
+            .scan_context
+            .backfill_tx
+            .send(BackfillMessage::Shutdown);
         let _ = self.watcher_tx.send(WatcherMessage::Shutdown);
         let _ = self.write_tx.send(WriteCommand::Shutdown);
+    }
+}
+
+// 進捗を排他で書き換える。ロックが壊れていても走査自体は続けたいので失敗は握り潰す。
+fn update_progress(progress: &Mutex<IndexProgress>, edit: impl FnOnce(&mut IndexProgress)) {
+    if let Ok(mut progress) = progress.lock() {
+        edit(&mut progress);
     }
 }
 
@@ -504,6 +679,33 @@ mod tests {
     fn write_dummy(path: &std::path::Path, bytes: usize) {
         let data = vec![0_u8; bytes];
         fs::write(path, data).expect("write dummy file");
+    }
+
+    // フェーズ2（コメント補完）まで含めてインデックス作成が落ち着くのを待つ。
+    //
+    // ffprobe が未導入の環境ではフェーズ2は取得待ちを残したまま抜ける（後で取り直せる
+    // ようにするため）。その場合は取得待ちが捌けることを待機条件にできない。
+    fn wait_for_index_idle(engine: &SearchEngine) {
+        let expects_drained = crate::paths::ffprobe_ready();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let drained = !expects_drained || count_pending_comments(engine) == 0;
+            if !engine.progress().is_active() && drained {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("インデックス作成が終わらなかった");
+    }
+
+    fn count_pending_comments(engine: &SearchEngine) -> i64 {
+        let conn = open_connection(&engine.inner.db_path).expect("open index");
+        conn.query_row(
+            "SELECT COUNT(*) FROM files WHERE comment_norm IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count pending")
     }
 
     fn setup_engine() -> (tempfile::TempDir, SearchEngine) {
@@ -533,7 +735,7 @@ mod tests {
         write_dummy(&root.join("ignore.txt"), 64);
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -566,7 +768,7 @@ mod tests {
         write_dummy(&root.join("完了通知.mp4"), 64);
         let events = engine.subscribe_index_events();
 
-        engine.sync_roots(&[root]).expect("sync roots");
+        engine.sync_roots_and_rescan(&[root]).expect("sync roots");
         assert!(matches!(
             events.recv_timeout(Duration::from_secs(2)),
             Ok(IndexEvent::UpdateStarted {
@@ -592,6 +794,39 @@ mod tests {
     }
 
     #[test]
+    fn indexes_file_names_before_reading_comments() {
+        let (temp, engine) = setup_engine();
+        let root = temp.path().join("videos");
+        fs::create_dir_all(&root).expect("create root");
+        write_dummy(&root.join("先に出る名前.mp4"), 64);
+        let events = engine.subscribe_index_events();
+
+        engine.sync_roots_and_rescan(&[root]).expect("sync roots");
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(5)),
+            Ok(IndexEvent::UpdateStarted { .. })
+        ));
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(5)),
+            Ok(IndexEvent::UpdateFinished { result: Ok(()), .. })
+        ));
+
+        // フェーズ1が終わった時点でファイル名検索はできる。
+        let hits = engine
+            .search(&SearchRequest {
+                query: "先に出る名前".to_string(),
+                limit: 20,
+                ..Default::default()
+            })
+            .expect("search right after phase 1");
+        assert_eq!(hits.len(), 1);
+
+        // ffprobe が中身を読めないダミーファイルでもフェーズ2は取得待ちを残さず終わる。
+        // 残すと同じ行を引き当て続けて永久に回り続けてしまう。
+        wait_for_index_idle(&engine);
+    }
+
+    #[test]
     fn supports_metadata_filters() {
         let (temp, engine) = setup_engine();
         let root = temp.path().join("videos");
@@ -601,7 +836,7 @@ mod tests {
         write_dummy(&root.join("large.mp4"), 8_192);
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -626,7 +861,7 @@ mod tests {
         fs::create_dir_all(&root).expect("create root");
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         thread::sleep(Duration::from_millis(200));
 
@@ -686,7 +921,7 @@ mod tests {
 
         write_dummy(&root.join("100%_test.mp4"), 64);
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -711,7 +946,7 @@ mod tests {
         write_dummy(&root.join("ふ・れ・ん・ど・し・た・い.mp4"), 64);
         write_dummy(&root.join("ふ・た・り.mp4"), 64);
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));
@@ -748,10 +983,10 @@ mod tests {
         write_dummy(&video_path, 64);
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
-        engine.reindex_all_async().expect("reindex all");
-        thread::sleep(Duration::from_millis(350));
+        // 手で入れたコメントをフェーズ2に上書きされないよう、収まるまで待つ。
+        wait_for_index_idle(&engine);
 
         let conn = open_connection(&engine.inner.db_path).expect("open index");
         conn.execute(
@@ -793,7 +1028,7 @@ mod tests {
         write_dummy(&root.join("ウザい映像.mp4"), 64);
 
         engine
-            .sync_roots(std::slice::from_ref(&root))
+            .sync_roots_and_rescan(std::slice::from_ref(&root))
             .expect("sync roots");
         engine.reindex_all_async().expect("reindex all");
         thread::sleep(Duration::from_millis(350));

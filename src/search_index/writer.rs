@@ -1,13 +1,17 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 
+use super::comments::BackfillMessage;
 use super::db::{apply_migrations, open_connection};
-use super::normalize::escape_like_pattern;
-use super::{EngineResult, WriteCommand};
+use super::{CommentRecord, EngineResult, WriteCommand};
 
 // 書き込み専用スレッドでコマンドを順次適用する。
-pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
+pub(super) fn writer_loop(
+    db_path: PathBuf,
+    rx: Receiver<WriteCommand>,
+    backfill_tx: Sender<BackfillMessage>,
+) {
     let mut conn = match open_connection(&db_path).and_then(|conn| {
         apply_migrations(&conn)?;
         Ok(conn)
@@ -20,14 +24,61 @@ pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
     };
 
     while let Ok(cmd) = rx.recv() {
-        if let WriteCommand::Shutdown = cmd {
-            break;
-        }
-
-        if let Err(err) = apply_write_command(&mut conn, cmd) {
-            crate::log_error!(Search, "検索インデックスの更新に失敗しました: {err}");
+        match cmd {
+            WriteCommand::Shutdown => break,
+            // ここまでのコマンドはすべて適用済みなので、フェーズ2は新しい取得待ちを
+            // 必ず見られる。呼び出し側から直接 Kick すると取りこぼす。
+            WriteCommand::NotifyCommentPending => {
+                let _ = backfill_tx.send(BackfillMessage::Kick);
+            }
+            cmd => {
+                if let Err(err) = apply_write_command(&mut conn, cmd) {
+                    crate::log_error!(Search, "検索インデックスの更新に失敗しました: {err}");
+                }
+            }
         }
     }
+}
+
+// フェーズ2（コメント補完）の書き込み。
+fn upsert_comments(conn: &mut Connection, comments: Vec<CommentRecord>) -> EngineResult<()> {
+    if comments.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    {
+        // ffprobe 実行中に監視側が同じ行を更新していることがあるため、読み出した時点の
+        // サイズと更新日時が一致する行だけを更新して、古い内容の上書きを防ぐ。
+        let mut stmt = tx
+            .prepare(
+                "UPDATE files
+                 SET comment = ?, comment_norm = ?
+                 WHERE path = ? AND size_bytes = ? AND modified_time = ?",
+            )
+            .map_err(|err| err.to_string())?;
+
+        for comment in comments {
+            stmt.execute(params![
+                comment.comment,
+                comment.comment_norm,
+                comment.path,
+                comment.size_bytes,
+                comment.modified_time
+            ])
+            .map_err(|err| err.to_string())?;
+        }
+    }
+    tx.commit().map_err(|err| err.to_string())
+}
+
+// あるパス配下（`prefix` + 区切り文字で始まる）だけを含む、BINARY 照合での半開区間を返す。
+// 区切り文字は ASCII なので、上限は区切り文字を1つ進めた文字で作れる。
+fn descendant_path_range(prefix: &str) -> (String, String) {
+    let sep = if prefix.contains('\\') { b'\\' } else { b'/' };
+    let lower = format!("{prefix}{}", sep as char);
+    let upper = format!("{prefix}{}", (sep + 1) as char);
+    (lower, upper)
 }
 
 // 受信した DB 更新コマンドをトランザクション付きで実行する。
@@ -78,6 +129,9 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
 
             let tx = conn.transaction().map_err(|err| err.to_string())?;
             {
+                // フェーズ1（ファイル名インデックス）の書き込み。コメント列は触らない。
+                // サイズと更新日時が変わっていない行は取得済みコメントをそのまま残し、
+                // 変わっていれば NULL に戻してフェーズ2の取得待ちへ入れる。
                 let mut stmt = tx
                     .prepare(
                         "INSERT INTO files (
@@ -85,21 +139,31 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
                             root_id,
                             file_name,
                             file_name_norm,
-                            comment,
-                            comment_norm,
                             parent_dir,
                             size_bytes,
                             modified_time,
                             created_time,
-                            last_indexed_time
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            last_indexed_time,
+                            comment,
+                            comment_norm
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL)
                         ON CONFLICT(path) DO UPDATE SET
                             root_id = excluded.root_id,
                             file_name = excluded.file_name,
                             file_name_norm = excluded.file_name_norm,
-                            comment = excluded.comment,
-                            comment_norm = excluded.comment_norm,
                             parent_dir = excluded.parent_dir,
+                            comment = CASE
+                                WHEN files.size_bytes = excluded.size_bytes
+                                     AND files.modified_time = excluded.modified_time
+                                THEN files.comment
+                                ELSE ''
+                            END,
+                            comment_norm = CASE
+                                WHEN files.size_bytes = excluded.size_bytes
+                                     AND files.modified_time = excluded.modified_time
+                                THEN files.comment_norm
+                                ELSE NULL
+                            END,
                             size_bytes = excluded.size_bytes,
                             modified_time = excluded.modified_time,
                             created_time = excluded.created_time,
@@ -113,8 +177,6 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
                         file.root_id,
                         file.file_name,
                         file.file_name_norm,
-                        file.comment,
-                        file.comment_norm,
                         file.parent_dir,
                         file.size_bytes,
                         file.modified_time,
@@ -125,6 +187,11 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
                 }
             }
             tx.commit().map_err(|err| err.to_string())?;
+        }
+        WriteCommand::UpsertComments { comments, resp } => {
+            let result = upsert_comments(conn, comments);
+            let _ = resp.send(result.clone());
+            result?;
         }
         WriteCommand::DeletePaths { paths } => {
             if paths.is_empty() {
@@ -148,14 +215,15 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
             }
             let tx = conn.transaction().map_err(|err| err.to_string())?;
             {
+                // LIKE の前方一致は OR と ESCAPE のせいで索引が使えず、プレフィックス1件ごとに
+                // files を全走査してしまう。主キー path は BINARY 照合なので、配下の判定を
+                // 範囲比較へ置き換えて主キー索引で引けるようにする。
                 let mut stmt = tx
-                    .prepare("DELETE FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'")
+                    .prepare("DELETE FROM files WHERE path = ? OR (path >= ? AND path < ?)")
                     .map_err(|err| err.to_string())?;
                 for prefix in prefixes {
-                    let sep = if prefix.contains('\\') { '\\' } else { '/' };
-                    let escaped = escape_like_pattern(&prefix);
-                    let pattern = format!("{escaped}{sep}%");
-                    stmt.execute(params![prefix, pattern])
+                    let (lower, upper) = descendant_path_range(&prefix);
+                    stmt.execute(params![prefix, lower, upper])
                         .map_err(|err| err.to_string())?;
                 }
             }
@@ -184,7 +252,208 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
             let _ = resp.send(result.clone());
             result?;
         }
-        WriteCommand::Shutdown => {}
+        // writer_loop が受信した順序のまま扱うため、ここへは来ない。
+        WriteCommand::NotifyCommentPending | WriteCommand::Shutdown => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::super::comments::BackfillMessage;
+    use super::super::db::{apply_migrations, open_connection};
+    use super::super::{CommentRecord, FileRecord, WriteCommand};
+    use super::{apply_write_command, descendant_path_range, writer_loop};
+
+    fn file_record(size_bytes: i64, modified_time: i64) -> FileRecord {
+        FileRecord {
+            path: "/videos/a.mp4".to_string(),
+            root_id: 1,
+            file_name: "a.mp4".to_string(),
+            file_name_norm: "a.mp4".to_string(),
+            parent_dir: "/videos".to_string(),
+            size_bytes,
+            modified_time,
+            created_time: None,
+            last_indexed_time: 1,
+        }
+    }
+
+    fn setup_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open DB");
+        apply_migrations(&conn).expect("migrate");
+        conn.execute("INSERT INTO roots (root_path) VALUES ('/videos')", [])
+            .expect("insert root");
+        conn
+    }
+
+    fn stored_comment(conn: &Connection) -> (String, Option<String>) {
+        conn.query_row(
+            "SELECT comment, comment_norm FROM files WHERE path = '/videos/a.mp4'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read comment")
+    }
+
+    fn upsert_comment(conn: &mut Connection, size_bytes: i64, modified_time: i64) {
+        let (tx, rx) = mpsc::channel();
+        apply_write_command(
+            conn,
+            WriteCommand::UpsertComments {
+                comments: vec![CommentRecord {
+                    path: "/videos/a.mp4".to_string(),
+                    size_bytes,
+                    modified_time,
+                    comment: "概要欄".to_string(),
+                    comment_norm: "概要欄".to_string(),
+                }],
+                resp: tx,
+            },
+        )
+        .expect("upsert comments");
+        rx.recv().expect("response").expect("commit");
+    }
+
+    fn upsert_file(conn: &mut Connection, size_bytes: i64, modified_time: i64) {
+        apply_write_command(
+            conn,
+            WriteCommand::UpsertFiles {
+                files: vec![file_record(size_bytes, modified_time)],
+            },
+        )
+        .expect("upsert files");
+    }
+
+    #[test]
+    fn phase1_upsert_leaves_new_rows_waiting_for_comments() {
+        let mut conn = setup_conn();
+        upsert_file(&mut conn, 100, 10);
+        assert_eq!(stored_comment(&conn), (String::new(), None));
+    }
+
+    #[test]
+    fn phase1_upsert_keeps_comments_of_unchanged_files() {
+        let mut conn = setup_conn();
+        upsert_file(&mut conn, 100, 10);
+        upsert_comment(&mut conn, 100, 10);
+
+        // 実体が変わっていない再走査ではコメントを取り直させない。
+        upsert_file(&mut conn, 100, 10);
+        assert_eq!(
+            stored_comment(&conn),
+            ("概要欄".to_string(), Some("概要欄".to_string()))
+        );
+    }
+
+    #[test]
+    fn phase1_upsert_clears_comments_of_changed_files() {
+        let mut conn = setup_conn();
+        upsert_file(&mut conn, 100, 10);
+        upsert_comment(&mut conn, 100, 10);
+
+        // サイズが変わったら取得し直させる。
+        upsert_file(&mut conn, 200, 10);
+        assert_eq!(stored_comment(&conn), (String::new(), None));
+
+        upsert_comment(&mut conn, 200, 10);
+        // 更新日時が変わった場合も同じ。
+        upsert_file(&mut conn, 200, 20);
+        assert_eq!(stored_comment(&conn), (String::new(), None));
+    }
+
+    #[test]
+    fn comment_upsert_skips_rows_that_changed_while_probing() {
+        let mut conn = setup_conn();
+        upsert_file(&mut conn, 100, 10);
+        // ffprobe 実行中に実体が差し替わった想定。読み出し時点の値では更新させない。
+        upsert_comment(&mut conn, 999, 999);
+        assert_eq!(stored_comment(&conn), (String::new(), None));
+    }
+
+    #[test]
+    fn notifies_backfill_after_preceding_writes_are_committed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.db");
+        let (write_tx, write_rx) = mpsc::channel();
+        let (backfill_tx, backfill_rx) = mpsc::channel();
+        let db_for_writer = db_path.clone();
+        let writer = thread::spawn(move || writer_loop(db_for_writer, write_rx, backfill_tx));
+
+        let (root_tx, root_rx) = mpsc::channel();
+        write_tx
+            .send(WriteCommand::AddOrEnableRoot {
+                root_path: "/videos".to_string(),
+                resp: root_tx,
+            })
+            .expect("send root");
+        root_rx.recv().expect("root response").expect("add root");
+
+        // 監視側と同じ手順。UpsertFiles は応答を待たずに積み、通知だけを後ろへ並べる。
+        write_tx
+            .send(WriteCommand::UpsertFiles {
+                files: vec![file_record(100, 10)],
+            })
+            .expect("send upsert");
+        write_tx
+            .send(WriteCommand::NotifyCommentPending)
+            .expect("send notify");
+
+        assert!(matches!(
+            backfill_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(BackfillMessage::Kick)
+        ));
+
+        // Kick が届いた時点で取得待ちの行が見えていなければ、バックフィルは0件で
+        // 抜けてしまい、その後の Kick も起きない。
+        let conn = open_connection(&db_path).expect("open index");
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE comment_norm IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count pending");
+        assert_eq!(pending, 1);
+
+        write_tx
+            .send(WriteCommand::Shutdown)
+            .expect("send shutdown");
+        writer.join().expect("writer thread");
+    }
+
+    fn in_range(path: &str, prefix: &str) -> bool {
+        let (lower, upper) = descendant_path_range(prefix);
+        path >= lower.as_str() && path < upper.as_str()
+    }
+
+    #[test]
+    fn range_covers_only_descendants() {
+        for (prefix, inside, outside) in [
+            (
+                "E:\\videos\\live",
+                ["E:\\videos\\live\\a.mp4", "E:\\videos\\live\\sub\\b.mp4"],
+                ["E:\\videos\\live2\\a.mp4", "E:\\videos\\lit\\a.mp4"],
+            ),
+            (
+                "/Users/vj/videos",
+                ["/Users/vj/videos/a.mp4", "/Users/vj/videos/sub/b.mp4"],
+                ["/Users/vj/videos2/a.mp4", "/Users/vj/video/a.mp4"],
+            ),
+        ] {
+            for path in inside {
+                assert!(in_range(path, prefix), "{path} は {prefix} 配下");
+            }
+            for path in outside {
+                assert!(!in_range(path, prefix), "{path} は {prefix} 配下ではない");
+            }
+            // ルート自身は範囲に含めず、呼び出し側が path = ? で別途消す。
+            assert!(!in_range(prefix, prefix));
+        }
+    }
 }

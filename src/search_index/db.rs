@@ -15,6 +15,11 @@ pub(super) fn open_connection(path: &Path) -> EngineResult<Connection> {
         .map_err(|err| err.to_string())?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|err| err.to_string())?;
+    // LIKE は既定で大小文字を区別せず、そのままでは BINARY 照合の索引を使えないため全表走査になる。
+    // 検索対象の file_name_norm / comment_norm はクエリ側とともに normalize_for_search で
+    // 小文字化済みなので、区別する設定にしても一致結果は変わらず、前方一致で索引が効くようになる。
+    conn.pragma_update(None, "case_sensitive_like", true)
+        .map_err(|err| err.to_string())?;
     Ok(conn)
 }
 
@@ -76,6 +81,19 @@ pub(super) fn apply_migrations(conn: &Connection) -> EngineResult<()> {
         .map_err(|err| err.to_string())?;
     }
 
+    if version < 3 {
+        // コメント未取得の行だけを持つ部分索引。取得待ちの抽出と残件数の集計を
+        // files の全走査なしに行うために置く。処理が進むほど索引自体が縮む。
+        conn.execute_batch(
+            "BEGIN;
+            CREATE INDEX IF NOT EXISTS idx_files_comment_pending
+                ON files(path) WHERE comment_norm IS NULL;
+            PRAGMA user_version = 3;
+            COMMIT;",
+        )
+        .map_err(|err| err.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -83,7 +101,7 @@ pub(super) fn apply_migrations(conn: &Connection) -> EngineResult<()> {
 mod tests {
     use rusqlite::Connection;
 
-    use super::apply_migrations;
+    use super::{DB_SCHEMA_VERSION, apply_migrations};
 
     #[test]
     fn migrates_existing_index_to_comment_columns() {
@@ -115,7 +133,7 @@ mod tests {
         let version: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read schema version");
-        assert_eq!(version, 2);
+        assert_eq!(version, DB_SCHEMA_VERSION);
 
         let mut stmt = conn
             .prepare("SELECT name FROM pragma_table_info('files')")

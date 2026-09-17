@@ -32,7 +32,7 @@ cargo test search_index -- --test-threads=1
 - DB: SQLite（`~/.vjdownloader/search_index.sqlite3`）
 - 書き込み: 単一ライタースレッド（キュー経由）
 - 読み取り: 検索ワーカーでクエリ実行
-- 初回/再構築: `walkdir`でフルスキャン
+- 初回/再構築: `walkdir`でフルスキャン（フェーズ1）+ `ffprobe`によるコメント後埋め（フェーズ2）
 - 差分更新: `notify` + デバウンス
 
 ### SQLiteを使う理由
@@ -44,6 +44,41 @@ cargo test search_index -- --test-threads=1
 - SQLiteは同時書き込みを許さない。フルスキャン・差分更新・ルート同期がいずれも書き込むため、
   キューで直列化して呼び出し側からロック競合とリトライを消している
 
+### インデックス作成を2段階に分ける理由
+- コメント取得には1ファイルにつき1回 `ffprobe` プロセスを起動する必要がある。10万件規模だと
+  プロセス起動とHDDのランダムシークだけで数時間かかり、1段階のままでは検索が
+  まったく使えない時間がその長さぶん続く
+- フェーズ1（`scanner.rs`）はファイルの内容を読まず、`walkdir`の列挙結果だけで
+  `files`を更新する。数分で終わり、この時点でファイル名検索が使えるようになる
+- フェーズ2（`comments.rs`）は`comment_norm IS NULL`の行を拾って`ffprobe`にかける。
+  進行状態はDB上にあるので、途中で終了しても次回起動時に続きから再開できる
+- フェーズ1は未変更ファイル（サイズと更新日時が一致）のコメントをSQLの`CASE`で残す。
+  以前は前回分を`HashMap`へ全件読み込んでいたが、12万件・コメント1.5KB想定で
+  約880MBのメモリを走査中ずっと保持していた
+- フェーズ2は`ffprobe`をワーカースレッドで並列に走らせる。プロセス起動とファイル読み取りの
+  待ちが大半なので並列化が効く。上限は`MAX_COMMENT_WORKERS`
+- 1バッチ書き込むごとに writer の応答を待ってから次のバッチを引く。待たずに再検索すると
+  まだコミットされていない同じ行を引き当てて同じファイルを繰り返し処理してしまう
+- `ffprobe`の失敗は「ツールを動かせなかった」と「ファイルから読めなかった」で扱いを分ける。
+  前者を空コメントで確定させると、`comment_norm IS NULL`から外れてその行のコメント検索が
+  恒久的に欠落する。とくにWindowsは`SearchEngine`起動後に`ffprobe`を取得するため、
+  未導入中に走った初回バックフィルが既存の全行を空で確定させ得る。前者は取得待ちのまま残し、
+  後者だけ空コメントで確定させる（残し続けると同じ行を引き当てて先へ進めない）
+- 取得待ちがある状態で`ffprobe`が未導入なら、パスの冒頭で何もせず抜ける。全行を1件ずつ
+  起動失敗させても意味がないため。外部ツールの取得が終わった時点で`src/app.rs`が
+  `resume_comment_backfill`で起こし直す
+
+### 大量ファイル向けの実装上の注意
+- `open_connection`で`case_sensitive_like=ON`を設定している。`LIKE`は既定で大小文字を区別せず、
+  そのままではBINARY照合の`idx_files_file_name_norm`を使えず全表走査になる。検索対象の
+  `file_name_norm` / `comment_norm`はクエリ側とともに`normalize_for_search`で小文字化済みなので、
+  区別する設定にしても一致結果は変わらない
+- 走査中のメタデータは`WalkDir`の`DirEntry`から取り出す。Windowsではディレクトリ列挙時に
+  取得済みのものがキャッシュされており、`fs::metadata`を呼び直すとファイル数ぶんの追加I/Oになる
+- ディレクトリ配下の削除は`path LIKE 'prefix%'`ではなく主キーの範囲比較で引く。`OR`と`ESCAPE`が
+  付いた`LIKE`は索引が効かず、プレフィックス1件ごとに`files`を全走査してしまう
+- `ffprobe`は`FFPROBE_TIMEOUT`付きで実行する。応答しない1ファイルでスキャン全体が止まらないようにする
+
 ### 2段階検索の構成
 - 単語1つのクエリは、第1段階でファイル名の前方一致のみを引き、完全一致を先頭に並べる
 - 上限件数に届かない場合だけ、第2段階でファイル名とコメントの部分一致を引いて補う。
@@ -51,12 +86,20 @@ cargo test search_index -- --test-threads=1
 - 実装は`src/search_index/mod.rs`の`search`と`src/search_index/query.rs`の`QueryPattern`
 
 ## 監視イベントの注意点
+- 差分反映後のフェーズ2の起こし方は、writer キューへ`NotifyCommentPending`を積んで writer 側から
+  Kick させる。`flush_pending_changes`は`UpsertFiles`を非同期に送っただけで戻るため、
+  そのまま別スレッドのバックフィルへ Kick すると、まだコミットされていない待機行を照会して
+  0件で終わり、その後追加された行に対する Kick も起きない。writer は受信順に処理するので、
+  通知が処理される時点で先行の書き込みは必ず反映済みになる
+  （フルスキャン側は`FinalizeScan`の応答を待ってから Kick するため、この経路は不要）
 - OS監視イベントは順序入れ替わり・取りこぼしが起こり得ます
 - 本実装はデバウンスとイベント統合で吸収し、監視エラー時は有効ルートを再スキャンします
 - それでもDBが実体とずれた場合は、設定画面の`全体を再インデックス`で復旧できます
 
 ## 大規模フォルダ運用の注意
-- 初回スキャン時間はファイル数に比例して増加します
+- フェーズ1（ファイル名インデックス）はファイル数に比例しますが、内容を読まないため短時間で終わります
+- フェーズ2（コメント取得）は1ファイルにつき`ffprobe`を1回起動するため、10万件規模では数時間かかります。
+  この間もファイル名検索とダウンロードは通常どおり使えます
 - ルートを絞るほどDBサイズと更新負荷を抑えられます
 - 不要ディレクトリは検索対象ルートに含めない運用を推奨
 
@@ -79,6 +122,10 @@ cargo test search_index -- --test-threads=1
 | `normalize_for_search` | NFKC + lower + カタカナのひらがな化 | 検索正規化方式 |
 | `DEBOUNCE_WINDOW` | 700ms | 監視イベントのデバウンス幅 |
 | `UPSERT_BATCH_SIZE` | 256 | バッチupsert件数 |
+| `COMMENT_BATCH_SIZE` | 256 | フェーズ2で1度に取り出すコメント取得待ちの件数 |
+| `MAX_COMMENT_WORKERS` | 4 | フェーズ2の`ffprobe`同時実行数の上限 |
+| `STALLED_ROUND_LIMIT` | 3 | フェーズ2で残件数が減らないまま許容する連続回数 |
+| `FFPROBE_TIMEOUT` | 30s | 1ファイルあたりの`ffprobe`応答待ち上限 |
 | `MAX_SEARCH_LIMIT` | 1000 | 1回の検索で返す最大件数 |
 
 ## 実装主要ファイル
@@ -89,7 +136,9 @@ cargo test search_index -- --test-threads=1
 - `src/search_index/db.rs`: SQLiteスキーマとクエリ実行
 - `src/search_index/normalize.rs`: NFKC + lower + ひらがな化の正規化
 - `src/search_index/query.rs`: 検索クエリの解析
-- `src/search_index/scanner.rs`: `walkdir`によるフルスキャン
+- `src/search_index/scanner.rs`: `walkdir`によるフルスキャン（フェーズ1）
+- `src/search_index/comments.rs`: `ffprobe`による動画コメントの後埋め（フェーズ2）
+- `src/search_index/ui.rs`: インデックス作成の進捗ミニウィンドウ
 - `src/search_index/watcher.rs`: `notify`監視とデバウンス
 - `src/search_index/writer.rs`: 単一ライタースレッド
 - `src/settings/ui.rs`: 検索対象フォルダの追加・削除、全体を再インデックスのUI
