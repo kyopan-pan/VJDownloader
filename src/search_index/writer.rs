@@ -1,12 +1,17 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 
+use super::comments::BackfillMessage;
 use super::db::{apply_migrations, open_connection};
 use super::{CommentRecord, EngineResult, WriteCommand};
 
 // 書き込み専用スレッドでコマンドを順次適用する。
-pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
+pub(super) fn writer_loop(
+    db_path: PathBuf,
+    rx: Receiver<WriteCommand>,
+    backfill_tx: Sender<BackfillMessage>,
+) {
     let mut conn = match open_connection(&db_path).and_then(|conn| {
         apply_migrations(&conn)?;
         Ok(conn)
@@ -19,12 +24,18 @@ pub(super) fn writer_loop(db_path: PathBuf, rx: Receiver<WriteCommand>) {
     };
 
     while let Ok(cmd) = rx.recv() {
-        if let WriteCommand::Shutdown = cmd {
-            break;
-        }
-
-        if let Err(err) = apply_write_command(&mut conn, cmd) {
-            crate::log_error!(Search, "検索インデックスの更新に失敗しました: {err}");
+        match cmd {
+            WriteCommand::Shutdown => break,
+            // ここまでのコマンドはすべて適用済みなので、フェーズ2は新しい取得待ちを
+            // 必ず見られる。呼び出し側から直接 Kick すると取りこぼす。
+            WriteCommand::NotifyCommentPending => {
+                let _ = backfill_tx.send(BackfillMessage::Kick);
+            }
+            cmd => {
+                if let Err(err) = apply_write_command(&mut conn, cmd) {
+                    crate::log_error!(Search, "検索インデックスの更新に失敗しました: {err}");
+                }
+            }
         }
     }
 }
@@ -241,7 +252,8 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
             let _ = resp.send(result.clone());
             result?;
         }
-        WriteCommand::Shutdown => {}
+        // writer_loop が受信した順序のまま扱うため、ここへは来ない。
+        WriteCommand::NotifyCommentPending | WriteCommand::Shutdown => {}
     }
     Ok(())
 }
@@ -250,10 +262,13 @@ pub(super) fn apply_write_command(conn: &mut Connection, cmd: WriteCommand) -> E
 mod tests {
     use rusqlite::Connection;
     use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
-    use super::super::db::apply_migrations;
+    use super::super::comments::BackfillMessage;
+    use super::super::db::{apply_migrations, open_connection};
     use super::super::{CommentRecord, FileRecord, WriteCommand};
-    use super::{apply_write_command, descendant_path_range};
+    use super::{apply_write_command, descendant_path_range, writer_loop};
 
     fn file_record(size_bytes: i64, modified_time: i64) -> FileRecord {
         FileRecord {
@@ -359,6 +374,57 @@ mod tests {
         // ffprobe 実行中に実体が差し替わった想定。読み出し時点の値では更新させない。
         upsert_comment(&mut conn, 999, 999);
         assert_eq!(stored_comment(&conn), (String::new(), None));
+    }
+
+    #[test]
+    fn notifies_backfill_after_preceding_writes_are_committed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.db");
+        let (write_tx, write_rx) = mpsc::channel();
+        let (backfill_tx, backfill_rx) = mpsc::channel();
+        let db_for_writer = db_path.clone();
+        let writer = thread::spawn(move || writer_loop(db_for_writer, write_rx, backfill_tx));
+
+        let (root_tx, root_rx) = mpsc::channel();
+        write_tx
+            .send(WriteCommand::AddOrEnableRoot {
+                root_path: "/videos".to_string(),
+                resp: root_tx,
+            })
+            .expect("send root");
+        root_rx.recv().expect("root response").expect("add root");
+
+        // 監視側と同じ手順。UpsertFiles は応答を待たずに積み、通知だけを後ろへ並べる。
+        write_tx
+            .send(WriteCommand::UpsertFiles {
+                files: vec![file_record(100, 10)],
+            })
+            .expect("send upsert");
+        write_tx
+            .send(WriteCommand::NotifyCommentPending)
+            .expect("send notify");
+
+        assert!(matches!(
+            backfill_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(BackfillMessage::Kick)
+        ));
+
+        // Kick が届いた時点で取得待ちの行が見えていなければ、バックフィルは0件で
+        // 抜けてしまい、その後の Kick も起きない。
+        let conn = open_connection(&db_path).expect("open index");
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE comment_norm IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count pending");
+        assert_eq!(pending, 1);
+
+        write_tx
+            .send(WriteCommand::Shutdown)
+            .expect("send shutdown");
+        writer.join().expect("writer thread");
     }
 
     fn in_range(path: &str, prefix: &str) -> bool {

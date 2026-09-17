@@ -180,6 +180,10 @@ enum WriteCommand {
     UpsertFiles {
         files: Vec<FileRecord>,
     },
+    // 先行する書き込みがコミットされた後にフェーズ2へ Kick を送らせる。
+    // 呼び出し側から直接 Kick すると、まだコミットされていない取得待ちを
+    // 見落として0件で終わり、次の Kick も起きないまま取り残される。
+    NotifyCommentPending,
     UpsertComments {
         comments: Vec<CommentRecord>,
         // 反映を待ってから次のバッチを引くための応答口。待たずに再検索すると
@@ -237,9 +241,16 @@ struct ScanContext {
 }
 
 impl ScanContext {
-    // フェーズ2に取りこぼしがないか確認させる。
+    // フェーズ2に取りこぼしがないか確認させる。writer へ積んだ書き込みが
+    // コミット済みであることが確かな場所からだけ呼ぶ。
     fn kick_comment_backfill(&self) {
         let _ = self.backfill_tx.send(BackfillMessage::Kick);
+    }
+
+    // 直前に writer へ積んだ書き込みのコミット後にフェーズ2を起こす。
+    // writer は受信順に処理するため、この通知が処理される時点で先行分は反映済み。
+    fn kick_comment_backfill_after_writes(&self) {
+        let _ = self.write_tx.send(WriteCommand::NotifyCommentPending);
     }
 
     fn update_progress(&self, edit: impl FnOnce(&mut IndexProgress)) {
@@ -281,14 +292,15 @@ impl SearchEngine {
         apply_migrations(&conn)?;
         drop(conn);
 
+        let (backfill_tx, backfill_rx) = mpsc::channel();
         let (write_tx, write_rx) = mpsc::channel();
         let db_for_writer = db_path.clone();
-        thread::spawn(move || writer_loop(db_for_writer, write_rx));
+        let backfill_tx_for_writer = backfill_tx.clone();
+        thread::spawn(move || writer_loop(db_for_writer, write_rx, backfill_tx_for_writer));
 
         let progress = Arc::new(Mutex::new(IndexProgress::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let (backfill_tx, backfill_rx) = mpsc::channel();
         let scan_context = ScanContext {
             db_path: db_path.clone(),
             write_tx: write_tx.clone(),
@@ -326,6 +338,11 @@ impl SearchEngine {
         // 前回の終了で取り残したコメント取得待ちを引き継ぐ。
         engine.inner.scan_context.kick_comment_backfill();
         Ok(engine)
+    }
+
+    // ffprobe の導入待ちで保留したコメント取得を、外部の準備完了に合わせて起こす。
+    pub fn resume_comment_backfill(&self) {
+        self.inner.scan_context.kick_comment_backfill();
     }
 
     // 進捗ウィンドウ用に現在の進捗を複製して返す。毎フレーム呼ばれるため軽い処理に保つ。
@@ -665,10 +682,15 @@ mod tests {
     }
 
     // フェーズ2（コメント補完）まで含めてインデックス作成が落ち着くのを待つ。
+    //
+    // ffprobe が未導入の環境ではフェーズ2は取得待ちを残したまま抜ける（後で取り直せる
+    // ようにするため）。その場合は取得待ちが捌けることを待機条件にできない。
     fn wait_for_index_idle(engine: &SearchEngine) {
+        let expects_drained = crate::paths::ffprobe_ready();
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if !engine.progress().is_active() && count_pending_comments(engine) == 0 {
+            let drained = !expects_drained || count_pending_comments(engine) == 0;
+            if !engine.progress().is_active() && drained {
                 return;
             }
             thread::sleep(Duration::from_millis(20));
@@ -799,7 +821,7 @@ mod tests {
             .expect("search right after phase 1");
         assert_eq!(hits.len(), 1);
 
-        // フェーズ2は ffprobe が失敗するダミーファイルでも取得待ちを残さず終わる。
+        // ffprobe が中身を読めないダミーファイルでもフェーズ2は取得待ちを残さず終わる。
         // 残すと同じ行を引き当て続けて永久に回り続けてしまう。
         wait_for_index_idle(&engine);
     }

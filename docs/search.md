@@ -59,6 +59,14 @@ cargo test search_index -- --test-threads=1
   待ちが大半なので並列化が効く。上限は`MAX_COMMENT_WORKERS`
 - 1バッチ書き込むごとに writer の応答を待ってから次のバッチを引く。待たずに再検索すると
   まだコミットされていない同じ行を引き当てて同じファイルを繰り返し処理してしまう
+- `ffprobe`の失敗は「ツールを動かせなかった」と「ファイルから読めなかった」で扱いを分ける。
+  前者を空コメントで確定させると、`comment_norm IS NULL`から外れてその行のコメント検索が
+  恒久的に欠落する。とくにWindowsは`SearchEngine`起動後に`ffprobe`を取得するため、
+  未導入中に走った初回バックフィルが既存の全行を空で確定させ得る。前者は取得待ちのまま残し、
+  後者だけ空コメントで確定させる（残し続けると同じ行を引き当てて先へ進めない）
+- 取得待ちがある状態で`ffprobe`が未導入なら、パスの冒頭で何もせず抜ける。全行を1件ずつ
+  起動失敗させても意味がないため。外部ツールの取得が終わった時点で`src/app.rs`が
+  `resume_comment_backfill`で起こし直す
 
 ### 大量ファイル向けの実装上の注意
 - `open_connection`で`case_sensitive_like=ON`を設定している。`LIKE`は既定で大小文字を区別せず、
@@ -78,6 +86,12 @@ cargo test search_index -- --test-threads=1
 - 実装は`src/search_index/mod.rs`の`search`と`src/search_index/query.rs`の`QueryPattern`
 
 ## 監視イベントの注意点
+- 差分反映後のフェーズ2の起こし方は、writer キューへ`NotifyCommentPending`を積んで writer 側から
+  Kick させる。`flush_pending_changes`は`UpsertFiles`を非同期に送っただけで戻るため、
+  そのまま別スレッドのバックフィルへ Kick すると、まだコミットされていない待機行を照会して
+  0件で終わり、その後追加された行に対する Kick も起きない。writer は受信順に処理するので、
+  通知が処理される時点で先行の書き込みは必ず反映済みになる
+  （フルスキャン側は`FinalizeScan`の応答を待ってから Kick するため、この経路は不要）
 - OS監視イベントは順序入れ替わり・取りこぼしが起こり得ます
 - 本実装はデバウンスとイベント統合で吸収し、監視エラー時は有効ルートを再スキャンします
 - それでもDBが実体とずれた場合は、設定画面の`全体を再インデックス`で復旧できます

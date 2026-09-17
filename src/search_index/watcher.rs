@@ -63,7 +63,8 @@ pub(super) fn watcher_loop(rx: Receiver<WatcherMessage>, context: ScanContext) {
         if should_flush_pending(&pending) {
             match flush_pending_changes(&mut pending, &watched_roots, &context) {
                 // 差分で入った行はコメントが未取得なので、フェーズ2に拾わせる。
-                Ok(()) => context.kick_comment_backfill(),
+                // flush は writer へ非同期で積むだけなので、コミット後に起こさせる。
+                Ok(()) => context.kick_comment_backfill_after_writes(),
                 Err(err) => {
                     crate::log_warn!(
                         Search,

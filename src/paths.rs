@@ -100,7 +100,13 @@ fn cached_media_tool_path(cache: &OnceLock<PathBuf>, name: &str) -> PathBuf {
 // アプリ起動後に導入した場合でも最新の状態を判定できる。
 #[cfg(target_os = "windows")]
 pub fn media_tools_ready() -> bool {
-    resolve_media_tool_path("ffmpeg").is_some() && resolve_media_tool_path("ffprobe").is_some()
+    resolve_media_tool_path("ffmpeg").is_some() && ffprobe_ready()
+}
+
+// ffprobeが使用可能かを返す。Windowsでは起動後にffprobeを取得するため、
+// 未導入のまま動画コメントを取得しに行かないよう呼び出し側で確認する。
+pub fn ffprobe_ready() -> bool {
+    resolve_media_tool_path("ffprobe").is_some()
 }
 
 pub fn deno_path() -> PathBuf {

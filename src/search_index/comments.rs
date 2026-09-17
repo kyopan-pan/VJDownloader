@@ -7,6 +7,7 @@
 // - 検索・ダウンロードと並行して動く（専用スレッドと writer キュー経由の書き込み）
 // - 途中で終了しても状態は DB 上（comment_norm IS NULL）にあるので次回続きから再開できる
 // - ffprobe はプロセス起動とファイル読み取りの待ちが大半なので並列に走らせる
+// - ffprobe を実行できなかった行は取得待ちのまま残し、後で取り直せるようにする
 
 use rusqlite::Connection;
 use serde_json::Value;
@@ -19,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::paths::ffprobe_path;
+use crate::paths::{ffprobe_path, ffprobe_ready};
 use crate::platform::process::hidden_command;
 
 use super::db::open_connection;
@@ -46,6 +47,25 @@ struct PendingFile {
     path: String,
     size_bytes: i64,
     modified_time: i64,
+}
+
+// コメント取得の失敗を、取り直す価値があるかどうかで分ける。
+#[derive(Debug)]
+enum ProbeError {
+    // ffprobe 自体を動かせなかった（未導入・起動失敗・無応答・出力の読み取り失敗）。
+    // 環境側の問題でファイルには何の問題もないため、取得待ちのまま残して後で取り直す。
+    ToolUnavailable(String),
+    // ffprobe は動いたが、そのファイルからは読めなかった。ファイル側の問題なので
+    // 空コメントで確定させる。実体が変わればフェーズ1が取得待ちへ戻す。
+    FileUnreadable(String),
+}
+
+impl ProbeError {
+    fn message(&self) -> &str {
+        match self {
+            Self::ToolUnavailable(message) | Self::FileUnreadable(message) => message,
+        }
+    }
 }
 
 // バックフィル専用スレッドの本体。Kick を受けるたびに、取得待ちが尽きるまで処理する。
@@ -89,6 +109,21 @@ fn run_backfill_pass(
     shutdown: &AtomicBool,
 ) -> EngineResult<()> {
     let conn = open_connection(db_path)?;
+    if count_pending(&conn)? == 0 {
+        return Ok(());
+    }
+
+    // ffprobe 未導入のまま走らせると、全行を「読めなかった」として扱いかねない。
+    // Windows は SearchEngine の起動後に ffprobe を取得するため、揃うまで何もしない。
+    // 取得が終わった時点で app 側が改めて Kick する。
+    if !ffprobe_ready() {
+        crate::log_info!(
+            Search,
+            "ffprobeが見つからないため、動画コメントの取得を保留します。"
+        );
+        return Ok(());
+    }
+
     let mut done: u64 = 0;
     let mut last_pending = u64::MAX;
     let mut stalled_rounds = 0;
@@ -127,12 +162,14 @@ fn run_backfill_pass(
             return Ok(());
         }
 
-        let batch_len = batch.len() as u64;
         let comments = probe_comments(batch, shutdown);
         if comments.is_empty() {
-            // 中断で1件も処理できなかった場合。ここで抜けないと同じ行を引き続ける。
+            // 中断、または ffprobe を動かせず全行を取得待ちへ残した場合。
+            // ここで抜けないと同じ行を引き続ける。
             return Ok(());
         }
+        // 取得待ちへ残した行はここに含まれないため、書き戻す件数だけを進捗へ反映する。
+        let probed_len = comments.len() as u64;
 
         // 反映を待ってから次のバッチを引く。待たずに再検索すると、まだコミットされていない
         // 同じ行を引き当てて同じファイルを繰り返し ffprobe にかけ続けてしまう。
@@ -145,10 +182,10 @@ fn run_backfill_pass(
             .map_err(|err| err.to_string())?;
         resp_rx.recv().map_err(|err| err.to_string())??;
 
-        done = done.saturating_add(batch_len);
+        done = done.saturating_add(probed_len);
         update_progress(progress, |progress| {
             progress.comment_done = done;
-            progress.comment_pending = progress.comment_pending.saturating_sub(batch_len);
+            progress.comment_pending = progress.comment_pending.saturating_sub(probed_len);
         });
     }
 }
@@ -191,9 +228,8 @@ fn load_pending_batch(conn: &Connection, limit: usize) -> EngineResult<Vec<Pendi
 
 // バッチを複数スレッドへ分けて ffprobe にかける。
 //
-// 取得に失敗した行も comment_norm を空文字で埋めて返す。NULL のまま残すと
-// 次のバッチで同じ行を引き当て続けて先へ進めなくなるため。実体が変わった時点で
-// フェーズ1が NULL へ戻すので、後から取り直す機会は残る。
+// 書き戻すレコードだけを返す。ffprobe を動かせなかった行は結果に含めず、
+// 取得待ち（comment_norm IS NULL）のまま残して後の Kick で取り直す。
 fn probe_comments(batch: Vec<PendingFile>, shutdown: &AtomicBool) -> Vec<CommentRecord> {
     let worker_count = comment_worker_count().min(batch.len().max(1));
     let cursor = AtomicUsize::new(0);
@@ -213,25 +249,11 @@ fn probe_comments(batch: Vec<PendingFile>, shutdown: &AtomicBool) -> Vec<Comment
                             break;
                         };
 
-                        let comment = match read_search_comment(Path::new(&file.path)) {
-                            Ok(comment) => comment,
-                            Err(err) => {
-                                crate::log_warn!(
-                                    Search,
-                                    "動画コメントの読み取りに失敗しました: {} ({err})",
-                                    file.path
-                                );
-                                String::new()
-                            }
-                        };
-
-                        results.push(CommentRecord {
-                            path: file.path.clone(),
-                            size_bytes: file.size_bytes,
-                            modified_time: file.modified_time,
-                            comment_norm: normalize_for_search(&comment),
-                            comment,
-                        });
+                        let probed = read_search_comment(Path::new(&file.path));
+                        log_probe_failure(&file.path, &probed);
+                        if let Some(record) = comment_record(file, probed) {
+                            results.push(record);
+                        }
                     }
                     results
                 })
@@ -246,6 +268,43 @@ fn probe_comments(batch: Vec<PendingFile>, shutdown: &AtomicBool) -> Vec<Comment
     })
 }
 
+// ffprobe の結果を書き戻すレコードへ変換する。取り直すべき失敗では None を返し、
+// その行を取得待ちのまま残す。
+fn comment_record(file: &PendingFile, probed: Result<String, ProbeError>) -> Option<CommentRecord> {
+    let comment = match probed {
+        Ok(comment) => comment,
+        // ファイル側の問題は空コメントで確定させる。NULL のまま残すと次のバッチで
+        // 同じ行を引き当て続けて先へ進めなくなる。
+        Err(ProbeError::FileUnreadable(_)) => String::new(),
+        Err(ProbeError::ToolUnavailable(_)) => return None,
+    };
+
+    Some(CommentRecord {
+        path: file.path.clone(),
+        size_bytes: file.size_bytes,
+        modified_time: file.modified_time,
+        comment_norm: normalize_for_search(&comment),
+        comment,
+    })
+}
+
+// 失敗の種類で扱いが変わるため、後で取り直すのかどうかもログへ残す。
+fn log_probe_failure(path: &str, probed: &Result<String, ProbeError>) {
+    match probed {
+        Ok(_) => {}
+        Err(err @ ProbeError::ToolUnavailable(_)) => crate::log_warn!(
+            Search,
+            "ffprobeを実行できなかったため、動画コメントは後で取り直します: {path} ({})",
+            err.message()
+        ),
+        Err(err @ ProbeError::FileUnreadable(_)) => crate::log_warn!(
+            Search,
+            "動画コメントの読み取りに失敗しました: {path} ({})",
+            err.message()
+        ),
+    }
+}
+
 fn comment_worker_count() -> usize {
     thread::available_parallelism()
         .map(|count| count.get())
@@ -254,7 +313,7 @@ fn comment_worker_count() -> usize {
 }
 
 // ffprobeからコメント系タグを取得する。タグ名の大文字・小文字は区別しない。
-fn read_search_comment(path: &Path) -> EngineResult<String> {
+fn read_search_comment(path: &Path) -> Result<String, ProbeError> {
     let mut child = hidden_command(ffprobe_path())
         .arg("-v")
         .arg("error")
@@ -267,24 +326,30 @@ fn read_search_comment(path: &Path) -> EngineResult<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| ProbeError::ToolUnavailable(err.to_string()))?;
 
     let Some((stdout, stderr)) = read_child_output(&mut child, FFPROBE_TIMEOUT) else {
         // 応答しない ffprobe を放置するとバックフィルがそのファイルで止まったままになる。
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!(
+        return Err(ProbeError::ToolUnavailable(format!(
             "ffprobeが{}秒以内に応答しませんでした",
             FFPROBE_TIMEOUT.as_secs()
-        ));
+        )));
     };
 
-    let status = child.wait().map_err(|err| err.to_string())?;
+    let status = child
+        .wait()
+        .map_err(|err| ProbeError::ToolUnavailable(err.to_string()))?;
     if !status.success() {
-        return Err(String::from_utf8_lossy(&stderr).trim().to_string());
+        // ffprobe は動いているので、読めないのはファイル側の問題として扱う。
+        return Err(ProbeError::FileUnreadable(
+            String::from_utf8_lossy(&stderr).trim().to_string(),
+        ));
     }
 
-    let value: Value = serde_json::from_slice(&stdout).map_err(|err| err.to_string())?;
+    let value: Value = serde_json::from_slice(&stdout)
+        .map_err(|err| ProbeError::FileUnreadable(err.to_string()))?;
     Ok(parse_search_comment(&value))
 }
 
@@ -346,7 +411,18 @@ fn parse_search_comment(value: &Value) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{MAX_COMMENT_WORKERS, comment_worker_count, parse_search_comment};
+    use super::{
+        MAX_COMMENT_WORKERS, PendingFile, ProbeError, comment_record, comment_worker_count,
+        parse_search_comment,
+    };
+
+    fn pending_file() -> PendingFile {
+        PendingFile {
+            path: "/videos/a.mp4".to_string(),
+            size_bytes: 100,
+            modified_time: 10,
+        }
+    }
 
     #[test]
     fn parses_comment_and_description_tags_case_insensitively() {
@@ -361,6 +437,43 @@ mod tests {
         });
 
         assert_eq!(parse_search_comment(&value), "YouTubeの概要欄\n補足説明");
+    }
+
+    #[test]
+    fn stores_normalized_comment_when_probe_succeeds() {
+        let record = comment_record(&pending_file(), Ok("ライブ映像".to_string()))
+            .expect("取得できた行は書き戻す");
+        assert_eq!(record.comment, "ライブ映像");
+        assert_eq!(record.comment_norm, "らいぶ映像");
+    }
+
+    #[test]
+    fn stores_empty_comment_when_file_is_unreadable() {
+        // ffprobe は動いたが読めなかったファイル。取得待ちに残すと同じ行を引き続ける。
+        let record = comment_record(
+            &pending_file(),
+            Err(ProbeError::FileUnreadable(
+                "moov atom not found".to_string(),
+            )),
+        )
+        .expect("読めなかった行は空コメントで確定させる");
+        assert_eq!(record.comment, "");
+        assert_eq!(record.comment_norm, "");
+    }
+
+    #[test]
+    fn keeps_row_pending_when_ffprobe_cannot_run() {
+        // ffprobe 未導入やタイムアウトで空コメントを確定させると、
+        // その行のコメント検索が恒久的に欠落する。
+        assert!(
+            comment_record(
+                &pending_file(),
+                Err(ProbeError::ToolUnavailable(
+                    "No such file or directory".to_string()
+                )),
+            )
+            .is_none()
+        );
     }
 
     #[test]

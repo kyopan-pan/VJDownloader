@@ -258,6 +258,8 @@ impl DownloaderApp {
             log_error!(Setup, "同梱ツールの配置に失敗しました: {err}");
         }
 
+        // ffprobeが揃うまで保留したコメント取得を、セットアップ完了後に起こすため持たせる。
+        let setup_engine = app.search_engine.clone();
         // ロガーはグローバルな集約点を参照するため、スレッドへ参照を渡す必要がない。
         thread::spawn(move || {
             if let Err(err) = ensure_yt_dlp() {
@@ -270,6 +272,11 @@ impl DownloaderApp {
             #[cfg(target_os = "windows")]
             if let Err(err) = crate::download::ensure_ffmpeg_tools() {
                 log_error!(Setup, "ffmpeg/ffprobeのセットアップに失敗しました: {err}");
+            }
+            // ffprobe未導入のまま走ったフェーズ2は取得待ちを残して抜けている。
+            // ここで起こさないと、次回起動までコメント検索が欠けたままになる。
+            if let Some(engine) = setup_engine {
+                engine.resume_comment_backfill();
             }
         });
 
